@@ -1,0 +1,184 @@
+/* Theme tokens. Dark values come from the design files; light follows the JetBrains Int UI Light palette.
+   `data-theme="system"` picks one of them through prefers-color-scheme. */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1f22;
+  --panel: #2b2d30;
+  --divider: #1e1f22;
+  --border: #393b40;
+  --control-border: #4e5157;
+  --dialog-border: #43454a;
+  --input-bg: #1e1f22;
+  --select-bg: #2b2d30;
+  --text: #dfe1e5;
+  --text-2: #ced0d6;
+  --muted: #868a91;
+  --disabled: #6f737a;
+  --disabled-border: #393b40;
+  --accent: #3574f0;
+  --primary: #3369d6;
+  --primary-hover: #3d74e0;
+  --on-primary: #ffffff;
+  --link: #548af7;
+  --link-hover: #7aa5fa;
+  --selection: #2e436e;
+  --tool-active: #43454a;
+  --hover: rgba(255, 255, 255, 0.06);
+  --warning: #f2c55c;
+  --warning-bg: #3d3223;
+  --info: #548af7;
+  --info-bg: #25324d;
+  --error: #e55765;
+  --error-bg: #402a2c;
+  --success: #6aab73;
+  --pending: #e0904a;
+  --logo: #c9620f;
+  --overlay: rgba(0, 0, 0, 0.45);
+  --dialog-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --menu-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --grid-dot: #34363b;
+  --edge: #868a91;
+  --card-bg: #2b2d30;
+  --card-ghost-bg: #1e1f22;
+  --card-border: #4e5157;
+  --card-dashed: #5e6168;
+  --card-dashed-planned: #4a4d53;
+  --progress-track: #43454a;
+  --close-hover: #c42b1c;
+  --scrollbar: rgba(255, 255, 255, 0.16);
+  --layer-foundation: #8c8f96;
+  --layer-capability: #3d6bb3;
+  --layer-adapter: #4f8a3a;
+  --layer-content: #a83c3c;
+  --layer-unknown: #6f737a;
+  --layer-foundation-dim: #5a5d62;
+  --layer-capability-dim: #2f4972;
+  --layer-adapter-dim: #3b5530;
+  --layer-content-dim: #6a2f30;
+  --layer-unknown-dim: #45474c;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #f7f8fa;
+  --divider: #ebecf0;
+  --border: #ebecf0;
+  --control-border: #c9ccd6;
+  --dialog-border: #dfe1e5;
+  --input-bg: #ffffff;
+  --select-bg: #ffffff;
+  --text: #000000;
+  --text-2: #494b57;
+  --muted: #6c707e;
+  --disabled: #a8adbd;
+  --disabled-border: #dfe1e5;
+  --accent: #3574f0;
+  --primary: #3574f0;
+  --primary-hover: #3369d6;
+  --on-primary: #ffffff;
+  --link: #2f62cf;
+  --link-hover: #2e55a3;
+  --selection: #d4e2ff;
+  --tool-active: #dfe1e5;
+  --hover: rgba(0, 0, 0, 0.05);
+  --warning: #c27d04;
+  --warning-bg: #fff6de;
+  --info: #3574f0;
+  --info-bg: #edf3ff;
+  --error: #db3b4b;
+  --error-bg: #fff2f3;
+  --success: #208a3c;
+  --pending: #c25e13;
+  --logo: #c9620f;
+  --overlay: rgba(0, 0, 0, 0.25);
+  --dialog-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+  --menu-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  --grid-dot: #e3e5ea;
+  --edge: #818594;
+  --card-bg: #ffffff;
+  --card-ghost-bg: #f7f8fa;
+  --card-border: #c9ccd6;
+  --card-dashed: #a8adbd;
+  --card-dashed-planned: #c9ccd6;
+  --progress-track: #dfe1e5;
+  --close-hover: #c42b1c;
+  --scrollbar: rgba(0, 0, 0, 0.2);
+  --layer-foundation: #8c8f96;
+  --layer-capability: #4f7fdb;
+  --layer-adapter: #5a9c48;
+  --layer-content: #cf5050;
+  --layer-unknown: #a8adbd;
+  --layer-foundation-dim: #c6c7cb;
+  --layer-capability-dim: #a7bfed;
+  --layer-adapter-dim: #b0d1a7;
+  --layer-content-dim: #ebb0b0;
+  --layer-unknown-dim: #dfe1e5;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #f7f8fa;
+    --divider: #ebecf0;
+    --border: #ebecf0;
+    --control-border: #c9ccd6;
+    --dialog-border: #dfe1e5;
+    --input-bg: #ffffff;
+    --select-bg: #ffffff;
+    --text: #000000;
+    --text-2: #494b57;
+    --muted: #6c707e;
+    --disabled: #a8adbd;
+    --disabled-border: #dfe1e5;
+    --accent: #3574f0;
+    --primary: #3574f0;
+    --primary-hover: #3369d6;
+    --on-primary: #ffffff;
+    --link: #2f62cf;
+    --link-hover: #2e55a3;
+    --selection: #d4e2ff;
+    --tool-active: #dfe1e5;
+    --hover: rgba(0, 0, 0, 0.05);
+    --warning: #c27d04;
+    --warning-bg: #fff6de;
+    --info: #3574f0;
+    --info-bg: #edf3ff;
+    --error: #db3b4b;
+    --error-bg: #fff2f3;
+    --success: #208a3c;
+    --pending: #c25e13;
+    --logo: #c9620f;
+    --overlay: rgba(0, 0, 0, 0.25);
+    --dialog-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+    --menu-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+    --grid-dot: #e3e5ea;
+    --edge: #818594;
+    --card-bg: #ffffff;
+    --card-ghost-bg: #f7f8fa;
+    --card-border: #c9ccd6;
+    --card-dashed: #a8adbd;
+    --card-dashed-planned: #c9ccd6;
+    --progress-track: #dfe1e5;
+    --close-hover: #c42b1c;
+    --scrollbar: rgba(0, 0, 0, 0.2);
+    --layer-foundation: #8c8f96;
+    --layer-capability: #4f7fdb;
+    --layer-adapter: #5a9c48;
+    --layer-content: #cf5050;
+    --layer-unknown: #a8adbd;
+    --layer-foundation-dim: #c6c7cb;
+    --layer-capability-dim: #a7bfed;
+    --layer-adapter-dim: #b0d1a7;
+    --layer-content-dim: #ebb0b0;
+    --layer-unknown-dim: #dfe1e5;
+  }
+}
+
+:root {
+  --font-ui: "Inter Variable", Inter, "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans SC", "Microsoft YaHei UI", monospace;
+}

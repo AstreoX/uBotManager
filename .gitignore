@@ -1,0 +1,9 @@
+# Build output
+target/
+app/node_modules/
+app/dist/
+
+# Logs and editor state
+*.log
+.vs/
+.idea/

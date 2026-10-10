@@ -1,0 +1,24 @@
+[package]
+name = "ubot-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "uBot Manager desktop app: the Tauri shell around ubot-core."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ubot-core = { path = "../crates/ubot-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[dev-dependencies]
+serde_json.workspace = true
+glob = "0.3"
