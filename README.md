@@ -301,7 +301,7 @@ cargo build --release -p ubot-cli      # 生成 target\release\ubot.exe
 ```
 
 - `npm run tauri build` 由 Tauri CLI 驱动：先运行 `npm run build` 生成 `app/dist`，再编译外壳并把前端嵌入。不要直接用 `cargo build` 构建 `ubot-manager`，那样得到的是开发构建，会去加载 `http://localhost:5173`。
-- 去掉 `--no-bundle` 会按 `tauri.conf.json` 生成 NSIS 安装包（按当前用户安装）。
+- 去掉 `--no-bundle` 会按 `tauri.conf.json` 生成 NSIS 安装包 `target\release\bundle\nsis\uBot Manager_<版本>_x64-setup.exe`：按当前用户安装，可在安装向导里选择目录，界面随系统语言显示中文或英文。首次打包时 Tauri 会把 NSIS 下载到 `%LOCALAPPDATA%\tauri`（不能改位置；想放到别的盘，可以先把这个目录建成指向别处的目录联接）。安装包没有代码签名，SmartScreen 会提示未知发布者。
 - 开发：在 `app/` 里运行 `npm run tauri dev` 启动带热更新的桌面程序；`npm run dev` 只启动前端，页面使用内存里的 mock 后端，可以用参数直达某个界面，例如 `http://localhost:5173/?lang=zh-CN&theme=light&view=problems`，参数有 `lang`、`theme`、`view`、`dialog`、`section`、`select`、`noproject`。
 
 测试：
