@@ -75,6 +75,97 @@ pub fn check_repository_url(url: &str) -> UrlVerdict {
     )
 }
 
+/// The URL policy of prebuilt archives (`binaries[engine][platform].url`, SPEC §1): the
+/// repository policy, and then only `https://`, `file://` or an absolute local path (team mirrors,
+/// tests). Plain `http://`, `ssh://` and `user@host:path` are refused, and so is a backslash in an
+/// `https://` URL: the downloader's parser ends the host at a `\` where a reader may not, so the
+/// host a person sees would not have to be the host that is contacted.
+pub fn check_binary_url(url: &str) -> Result<(), String> {
+    if let UrlVerdict::Rejected(reason) = check_repository_url(url) {
+        return Err(reason);
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        if url.contains('\\') {
+            return Err("backslashes are not allowed in https:// binary URLs".into());
+        }
+        Ok(())
+    } else if lower.starts_with("file://") || is_absolute_local_path(url) {
+        Ok(())
+    } else if lower.starts_with("http://") {
+        Err("plain http:// is not allowed for binaries; use https://".into())
+    } else {
+        Err("use an https:// or file:// URL or an absolute path".into())
+    }
+}
+
+/// What a step detail shows of an archive's location: the host and the file name
+/// (`github.com/…/UBotSensor-0.1.0-UE5.5-Win64.zip`), never the whole URL with its query or
+/// credentials. `file://` URLs and local paths are shown as their path. The host of a web URL is
+/// the one the downloader's parser (reqwest's) finds, so what is shown is what is contacted.
+pub fn display_download_source(url: &str) -> String {
+    let url = url.trim();
+    let without_query = url.split(['?', '#']).next().unwrap_or_default();
+    for scheme in ["https://", "http://"] {
+        if strip_prefix_ignore_case(without_query, scheme).is_some() {
+            let Ok(parsed) = reqwest::Url::parse(without_query) else {
+                return redact_credentials(without_query);
+            };
+            let host = match (parsed.host_str(), parsed.port()) {
+                (Some(host), Some(port)) => format!("{host}:{port}"),
+                (Some(host), None) => host.to_string(),
+                (None, _) => return redact_credentials(without_query),
+            };
+            let segments: Vec<&str> = parsed
+                .path_segments()
+                .map(|segments| segments.filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+            return match segments.as_slice() {
+                [] => host,
+                [file] => format!("{host}/{file}"),
+                [.., file] => format!("{host}/…/{file}"),
+            };
+        }
+    }
+    if let Some(rest) = strip_prefix_ignore_case(without_query, "file://") {
+        // file:///C:/x.zip -> C:/x.zip; file://server/share/x.zip -> //server/share/x.zip
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+        {
+            return rest[1..].to_string();
+        }
+        if rest.starts_with('/') {
+            return rest.to_string();
+        }
+        return format!("//{rest}");
+    }
+    redact_credentials(url)
+}
+
+/// A URL as the manager stores it in files that stay in the project (the install marker): web
+/// and `file://` URLs lose their credentials, query and fragment, which is where signed download
+/// links keep their tokens (the SHA-256 identifies the archive anyway). An absolute local path is
+/// kept as written, because `#` and `?` are part of a Windows file name.
+pub fn strip_url_secrets(url: &str) -> String {
+    let url = url.trim();
+    let redacted = redact_credentials(url);
+    let has_scheme = ["https://", "http://", "file://"]
+        .iter()
+        .any(|scheme| strip_prefix_ignore_case(&redacted, scheme).is_some());
+    if has_scheme {
+        redacted
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        redacted
+    }
+}
+
 /// `C:\…`, `C:/…`, `\\server\share\…` or `/…`.
 pub fn is_absolute_local_path(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -320,6 +411,118 @@ mod tests {
                 "{url:?} is rejected"
             );
         }
+    }
+
+    #[test]
+    fn binary_url_policy() {
+        for url in [
+            "https://github.com/AstreoX/uBotSensor/releases/download/v0.1.0/UBotSensor-0.1.0-UE5.5-Win64.zip",
+            "HTTPS://h/x.zip",
+            "file:///C:/mirror/x.zip",
+            "file://server/share/x.zip",
+            "C:\\mirror\\x.zip",
+            "D:/mirror/x.zip",
+            "\\\\server\\share\\x.zip",
+            "/srv/mirror/x.zip",
+        ] {
+            assert_eq!(check_binary_url(url), Ok(()), "{url}");
+        }
+        for (url, reason) in [
+            ("http://example.com/x.zip", "plain http://"),
+            ("http://127.0.0.1:8080/x.zip", "plain http://"),
+            ("ssh://git@h/x.zip", "https://"),
+            ("git@h:x.zip", "https://"),
+            ("relative/x.zip", "https://"),
+            ("ftp://h/x.zip", "not allowed"),
+            (
+                "https://evil.example.net\\@trusted.example.com/a/b.zip",
+                "backslash",
+            ),
+            ("https://h\\x/y.zip", "backslash"),
+            ("-https://h/x.zip", "'-'"),
+            ("https://h/a b.zip", "whitespace"),
+            ("ext::sh -c x", "whitespace"),
+            ("ext::x", "remote helper"),
+            ("", "empty"),
+        ] {
+            let error = check_binary_url(url).unwrap_err();
+            assert!(error.contains(reason), "{url}: {error}");
+        }
+    }
+
+    #[test]
+    fn download_sources_show_host_and_file_only() {
+        assert_eq!(
+            display_download_source(
+                "https://github.com/AstreoX/uBotSensor/releases/download/v0.1.0/UBotSensor-0.1.0-UE5.5-Win64.zip"
+            ),
+            "github.com/…/UBotSensor-0.1.0-UE5.5-Win64.zip"
+        );
+        assert_eq!(
+            display_download_source("https://user:SECRET@h.example/x.zip?token=SECRET#f"),
+            "h.example/x.zip"
+        );
+        assert_eq!(display_download_source("https://h.example"), "h.example");
+        assert_eq!(
+            display_download_source("http://127.0.0.1:8080/a/b.zip"),
+            "127.0.0.1:8080/…/b.zip"
+        );
+        assert_eq!(
+            display_download_source("file:///C:/mirror/x.zip"),
+            "C:/mirror/x.zip"
+        );
+        assert_eq!(
+            display_download_source("file://server/share/x.zip"),
+            "//server/share/x.zip"
+        );
+        assert_eq!(
+            display_download_source("D:\\mirror\\x.zip"),
+            "D:\\mirror\\x.zip"
+        );
+        // The host shown is the one the downloader's parser finds, whatever the text looks like.
+        assert_eq!(
+            display_download_source("https://evil.example.net\\@trusted.example.com/a/b.zip"),
+            "evil.example.net/…/b.zip"
+        );
+        assert_eq!(
+            display_download_source("https://trusted.example.com@evil.example.net/a/b.zip"),
+            "evil.example.net/…/b.zip"
+        );
+        assert_eq!(
+            display_download_source("HTTPS://User:Pw@Host.Example:8443/x.zip"),
+            "host.example:8443/x.zip"
+        );
+        assert_eq!(
+            display_download_source("https://[::1]:9/a/x.zip"),
+            "[::1]:9/…/x.zip"
+        );
+        // Untrusted text never panics.
+        let _ = display_download_source("https://仓/😀.zip");
+        let _ = display_download_source("file://");
+        let _ = display_download_source("https://");
+        let _ = display_download_source("https://:::/x");
+    }
+
+    #[test]
+    fn stored_urls_lose_secrets() {
+        assert_eq!(
+            strip_url_secrets("https://user:SECRETPW@h.example/dl/x.zip?sig=SECRETSIG&x=1#frag"),
+            "https://***@h.example/dl/x.zip"
+        );
+        assert_eq!(
+            strip_url_secrets("https://h.example/dl/x.zip"),
+            "https://h.example/dl/x.zip"
+        );
+        assert_eq!(
+            strip_url_secrets("file:///E:/mirror/x.zip?sig=SECRETSIG"),
+            "file:///E:/mirror/x.zip"
+        );
+        // A Windows file name may hold '#' and '?'-free names; a local path is kept as written.
+        assert_eq!(
+            strip_url_secrets("D:\\mirror\\x #1.zip"),
+            "D:\\mirror\\x #1.zip"
+        );
+        assert_eq!(strip_url_secrets("/srv/m#1/x.zip"), "/srv/m#1/x.zip");
     }
 
     #[test]

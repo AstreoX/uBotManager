@@ -126,7 +126,7 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// https anywhere; plain http only to the machine itself (local test servers).
-fn scheme_and_host_allowed(scheme: &str, host: Option<&str>) -> bool {
+pub(crate) fn scheme_and_host_allowed(scheme: &str, host: Option<&str>) -> bool {
     scheme.eq_ignore_ascii_case("https")
         || (scheme.eq_ignore_ascii_case("http") && host.is_some_and(is_loopback_host))
 }

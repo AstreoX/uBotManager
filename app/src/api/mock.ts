@@ -1,10 +1,12 @@
 // In-memory backend used when the frontend runs outside Tauri (vite dev / preview, screenshots).
 // It reproduces the design scenario: project MyRobotSim with UBotCore 0.1.0, UBotSensor 0.1.0 (0.1.1
-// available), UBotEnvironment 0.2.0 needing UBotCore ^0.2.0, UBotROS 0.1.0, UBotCombat disabled, the
-// legacy AgentSensorCore plugin and a ROS session problem. Package and recipe data come from a copy of
-// uBotCore's Index/index.json (mockIndex.json) with scenario versions layered on top.
+// available), UBotEnvironment 0.2.0 needing UBotCore ^0.2.0, UBotROS 0.1.0 (git checkouts), UBotCombat
+// disabled (installed from prebuilt binaries), the legacy AgentSensorCore plugin and a ROS session problem;
+// UBotVehicles and UBotCombat have prebuilt binaries for UE 5.5 Win64. Package and recipe data come from a
+// copy of uBotCore's Index/index.json (mockIndex.json) with scenario versions layered on top.
 
 import { renderMsg } from "../i18n";
+import { engineMajorMinor, PREBUILT_PLATFORM } from "../lib/format";
 import { compareVersionStrings, satisfies } from "../lib/semver";
 import type { Backend, GitTestResult, RosTestResult, TaskLogEvent } from "./backend";
 import type { MockParams } from "./mockParams";
@@ -15,9 +17,12 @@ import type {
 } from "./types";
 
 interface IndexRequire { name: string; version: string; optional?: boolean }
+/** One prebuilt zip: `binaries[engine Major.Minor][platform]`. */
+interface IndexBinary { url: string; sha256: string; size?: number }
 interface IndexVersion {
   version: string; ref?: string; planned?: boolean; engine?: string;
   requires?: IndexRequire[]; enginePlugins?: string[]; provides?: string[];
+  binaries?: Record<string, Record<string, IndexBinary>> | null;
 }
 interface IndexPackage {
   name: string; friendlyName?: string; description: { en: string; "zh-CN"?: string };
@@ -31,9 +36,15 @@ interface IndexRecipe {
 interface IndexReplacement { legacy: string; replacement: string; redirects?: string }
 interface IndexData { name: string; packages: IndexPackage[]; recipes?: IndexRecipe[]; replacements?: IndexReplacement[] }
 
+type InstallKind = NonNullable<PackageInfo["installKind"]>;
+
 interface Installed {
   name: string; version: string; enabled: boolean; ubot: boolean; location: string;
   requires: IndexRequire[]; enginePlugins: string[]; provides: string[];
+  /** How it was installed; `builtFor` is the engine (Major.Minor) of a prebuilt install's marker. */
+  kind: InstallKind; builtFor: string | null;
+  /** Binaries/Win64/UnrealEditor-*.dll are there (built, or came prebuilt). */
+  hasBinaries: boolean;
 }
 
 type InstalledLike = Pick<Installed, "name" | "enabled" | "requires">;
@@ -77,6 +88,19 @@ function scenarioIndex(): IndexData {
   const sensor010 = sensor?.versions[0];
   if (sensor && sensor010) sensor.versions.push({ ...clone(sensor010), version: "0.1.1", ref: "v0.1.1" });
   ["UBotVehicles", "UBotAerial", "UBotMCP", "UBotEnvironment", "UBotCombat"].forEach((name) => release(name));
+  // Prebuilt binaries for UE 5.5 Win64 (the release zips `ubot package` makes); the other packages build from source.
+  const prebuilt = (name: string, version: string, size: number, sha256: string) => {
+    const p = pkg(name);
+    const v = p?.versions.find((x) => x.version === version);
+    if (!p || !v) return;
+    const repo = (p.repository ?? "").replace(/\.git$/, "").split("/").pop() ?? name;
+    const file = `${name}-${version}-UE5.5-${PREBUILT_PLATFORM}.zip`;
+    v.binaries = {
+      "5.5": { [PREBUILT_PLATFORM]: { url: `https://github.com/AstreoX/${repo}/releases/download/v${version}/${file}`, sha256, size } }
+    };
+  };
+  prebuilt("UBotVehicles", "0.1.0", 47_815_066, "9f2c4b71d3a85e60c1f7b2a94e0d6c38a5b1f90e7d24c6a8b3e5f1029d7c4a6b");
+  prebuilt("UBotCombat", "0.1.0", 63_201_884, "4b8e1d06a7c39f52e8b0d4a1c6f73e95b2a0d8c4f61e7b39a5c2d0e8f4b17a63");
   const env = pkg("UBotEnvironment");
   const env010 = env?.versions[0];
   if (env && env010) {
@@ -85,6 +109,9 @@ function scenarioIndex(): IndexData {
       requires: [{ name: "UBotCore", version: "^0.2.0" }]
     });
   }
+  // The installed UBotCombat 0.1.0 needs UBotEnvironment 0.2.0; its index entry says the same, so a reinstall keeps it.
+  const combatEnv = pkg("UBotCombat")?.versions.find((v) => v.version === "0.1.0")?.requires?.find((r) => r.name === "UBotEnvironment");
+  if (combatEnv) combatEnv.version = "^0.2.0";
   return index;
 }
 
@@ -108,6 +135,35 @@ function folderOf(p: IndexPackage): string {
 
 function displayRepo(url: string): string {
   return url.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+}
+
+/**
+ * What a download step shows of its URL: the host and the file name, never the whole URL with its query or credentials
+ * (`github.com/…/UBotSensor-0.1.0-UE5.5-Win64.zip`). file:// URLs and local paths show as their path. Mirrors
+ * display_download_source of the core (crates/ubot-core/src/url.rs).
+ */
+export function downloadSource(url: string): string {
+  const text = url.trim();
+  const plain = text.split(/[?#]/)[0] ?? "";
+  const web = /^https?:\/\/(.*)$/is.exec(plain);
+  if (web) {
+    const rest = web[1] ?? "";
+    const slash = rest.indexOf("/");
+    const authority = slash < 0 ? rest : rest.slice(0, slash);
+    const path = slash < 0 ? "" : rest.slice(slash + 1);
+    const host = authority.slice(authority.lastIndexOf("@") + 1);
+    const segments = path.split("/").filter((s) => s !== "");
+    if (segments.length === 0) return host;
+    const file = segments[segments.length - 1] ?? "";
+    return segments.length === 1 ? `${host}/${file}` : `${host}/…/${file}`;
+  }
+  const local = /^file:\/\/(.*)$/is.exec(plain);
+  if (local) {
+    const rest = local[1] ?? "";
+    if (/^\/[a-z]:/i.test(rest)) return rest.slice(1);
+    return rest.startsWith("/") ? rest : `//${rest}`;
+  }
+  return text;
 }
 
 function asLayer(layer: string): Layer {
@@ -135,7 +191,12 @@ interface RunState {
   saveRecipe: string | null;
   canceled: boolean;
   buildLineMs: number;
+  /** Bytes a download step receives every DOWNLOAD_TICK_MS. */
+  downloadBytesPerTick: number;
 }
+
+const DOWNLOAD_TICK_MS = 250;
+const MEGABYTE = 1024 * 1024;
 
 export function createMockBackend(params: MockParams): { backend: Backend; initialChanges: Change[] } {
   const snapshotListeners = new Set<(s: Snapshot) => void>();
@@ -154,7 +215,8 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
       syncOnStart: true,
       showPlanned: true
     },
-    install: { directory: "Plugins/uBot", git: "git", usePrebuilt: false },
+    // `prebuilt=0` turns prebuilt binaries off, so installs clone and build (the Build design screenshot).
+    install: { directory: "Plugins/uBot", git: "git", usePrebuilt: params.prebuilt },
     build: { engineId: null, configuration: "Development", waitForEditor: true, reopenEditor: true, runTests: false },
     ros: { host: "127.0.0.1", port: 8268, checkOnRefresh: true },
     recentProjects: [SCENARIO_PROJECT, "D:\\Projects\\WarehouseBot\\WarehouseBot.uproject"],
@@ -180,7 +242,7 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
 
   function scenarioProject(): ProjectState {
     const installed = new Map<string, Installed>();
-    const add = (name: string, version: string, enabled: boolean, requires?: IndexRequire[]) => {
+    const add = (name: string, version: string, enabled: boolean, kind: InstallKind, requires?: IndexRequire[]) => {
       const p = indexPackage(name);
       const v = p?.versions.find((x) => x.version === version);
       if (!p || !v) return;
@@ -189,21 +251,23 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
         location: `Plugins/uBot/${folderOf(p)}`,
         requires: requires ?? clone(v.requires ?? []),
         enginePlugins: clone(v.enginePlugins ?? []),
-        provides: clone(v.provides ?? [])
+        provides: clone(v.provides ?? []),
+        kind, builtFor: kind === "prebuilt" ? "5.5" : null, hasBinaries: true
       });
     };
-    add("UBotCore", "0.1.0", true);
-    add("UBotSensor", "0.1.0", true);
-    add("UBotEnvironment", "0.2.0", true);
-    add("UBotROS", "0.1.0", true);
-    add("UBotCombat", "0.1.0", false, [
+    add("UBotCore", "0.1.0", true, "git");
+    add("UBotSensor", "0.1.0", true, "git");
+    add("UBotEnvironment", "0.2.0", true, "git");
+    add("UBotROS", "0.1.0", true, "git");
+    add("UBotCombat", "0.1.0", false, "prebuilt", [
       { name: "UBotCore", version: "^0.1.0" },
       { name: "UBotSensor", version: "^0.1.0" },
       { name: "UBotEnvironment", version: "^0.2.0" }
     ]);
     installed.set(key("AgentSensorCore"), {
       name: "AgentSensorCore", version: "0.5.0", enabled: true, ubot: false,
-      location: "Plugins/AgentSensorCore", requires: [], enginePlugins: [], provides: []
+      location: "Plugins/AgentSensorCore", requires: [], enginePlugins: [], provides: [],
+      kind: "other", builtFor: null, hasBinaries: true
     });
     return {
       path: SCENARIO_PROJECT, name: "MyRobotSim", dir: dirName(SCENARIO_PROJECT),
@@ -262,6 +326,15 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     const id = settings.build.engineId ?? "5.5";
     return ENGINES.find((e) => e.id === id) ?? null;
   };
+
+  /** The prebuilt zip an install or update of `name@version` would download for this project now, if any. */
+  function prebuiltFor(name: string, version: string): IndexBinary | null {
+    const ue = engine();
+    const engineKey = engineMajorMinor(ue?.version);
+    if (!settings.install.usePrebuilt || !ue || ue.kind !== "launcher" || !engineKey) return null;
+    const v = indexPackage(name)?.versions.find((x) => x.version === version && !x.planned);
+    return v?.binaries?.[engineKey]?.[PREBUILT_PLATFORM] ?? null;
+  }
 
   function enginePluginEnabled(p: ProjectState, name: string): boolean {
     return p.enabledEnginePlugins.has(key(name));
@@ -341,6 +414,18 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
           });
         }
       }
+      const engineKey = engineMajorMinor(engine()?.version);
+      if (inst.kind === "prebuilt" && inst.builtFor && engineKey && inst.builtFor !== engineKey) {
+        problems.push({
+          id: `prebuilt:${inst.name}`, scope: "packages", group: inst.name, severity: "warning",
+          message: msg("problem.prebuiltEngineMismatch", { package: inst.name, built: inst.builtFor, engine: engineKey }),
+          facts: [fact("package", `${inst.name} ${inst.version}`), fact("engine", engine()?.version ?? "—")],
+          fixes: [
+            { label: msg("fix.reinstall", { package: inst.name }), primary: true, action: { kind: "changes", changes: [{ kind: "update", package: inst.name, version: inst.version }] } },
+            { ...disableFix, primary: false }
+          ]
+        });
+      }
       for (const plugin of inst.enginePlugins) {
         const id = `enginePlugin:${inst.name}:${plugin}`;
         if (!ENGINE_PLUGINS.some((e) => key(e) === key(plugin))) {
@@ -398,7 +483,7 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     const k = key(name);
     return problems.filter((x) => {
       const parts = x.id.split(":");
-      if ((parts[0] === "requires" || parts[0] === "enginePlugin") && key(parts[1] ?? "") === k) return true;
+      if ((parts[0] === "requires" || parts[0] === "enginePlugin" || parts[0] === "prebuilt") && key(parts[1] ?? "") === k) return true;
       return x.scope === "session" && key(x.group) === k;
     }).map((x) => x.id);
   }
@@ -426,7 +511,11 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
         plannedVersion: planned?.version ?? null,
         updateAvailable,
         location: inst?.location ?? null,
-        git: inst ? { isCheckout: true, ref: `v${inst.version}`, dirty: false } : null,
+        git: inst ? (inst.kind === "git" ? { isCheckout: true, ref: `v${inst.version}`, dirty: false } : { isCheckout: false, ref: null, dirty: false }) : null,
+        installKind: inst?.kind ?? null,
+        // A git checkout updates by checking out; anything else (or a new install) can come prebuilt.
+        prebuiltAvailable: !!latest && inst?.kind !== "git" && prebuiltFor(pkg.name, latest.version) !== null,
+        prebuilt: inst?.kind === "prebuilt" && inst.builtFor ? { engine: inst.builtFor, platform: PREBUILT_PLATFORM } : null,
         repository: pkg.repository ?? null,
         webUrl: pkg.repository ? pkg.repository.replace(/\.git$/, "") : null,
         docsUrl: pkg.docsUrl ?? null,
@@ -507,10 +596,13 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     if (!project) return { changes, steps: [], needsBuild: false, editorRunning: false, errors: [msg("plan.noProject")], warnings };
     const p = project;
     // Working copy of the project so that later changes see earlier ones.
-    const work = new Map<string, { name: string; version: string; enabled: boolean; ubot: boolean; requires: IndexRequire[]; enginePlugins: string[]; location: string }>();
+    const work = new Map<string, Installed>();
     p.installed.forEach((v, k) => work.set(k, { ...v, requires: [...v.requires], enginePlugins: [...v.enginePlugins] }));
     const engineEnabled = new Set(p.enabledEnginePlugins);
-    type Draft = Omit<PlanStep, "id" | "n" | "needsEditorClosed">;
+    const engineKey = engineMajorMinor(engine()?.version) ?? "";
+    /** Packages this plan clones or checks out: their source changes, so they need a build. */
+    const fetched = new Set<string>();
+    type Draft = Omit<PlanStep, "id" | "n">;
     const downloads: Draft[] = [];
     const enginePluginSteps: Draft[] = [];
     const enables: Draft[] = [];
@@ -518,7 +610,12 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     const removes: Draft[] = [];
     const touched: string[] = [];
     const file = `${p.name}.uproject`;
-    const step = (group: StepGroup, kind: StepKind, title: Msg, detail: Msg): Draft => ({ group, kind, title, detail });
+    // A clone or a download into a new folder leaves the project alone, so it can run while the editor is open.
+    const step = (group: StepGroup, kind: StepKind, title: Msg, detail: Msg, needsEditorClosed = kind !== "clone"): Draft =>
+      ({ group, kind, title, detail, needsEditorClosed });
+    const downloadStep = (name: string, version: string, binary: IndexBinary, dest: string, replaces: boolean): Draft =>
+      step("download", "download", msg("step.download", { package: name, version }),
+        msg("step.download.detail", { source: downloadSource(binary.url), dest }), replaces);
     const touch = (name: string) => { if (!touched.includes(name)) touched.push(name); };
 
     const dependentsOf = (name: string) =>
@@ -575,10 +672,22 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
         errors.push(msg("plan.engineVersion", { package: pkg.name, version: v.version, range: v.engine, engine: ue.version }));
       }
       const location = `${settings.install.directory}/${folderOf(pkg)}`;
-      work.set(key(name), { name: pkg.name, version: v.version, enabled: false, ubot: true, requires: v.requires ?? [], enginePlugins: v.enginePlugins ?? [], location });
+      const binary = prebuiltFor(pkg.name, v.version);
+      if (!binary && settings.install.usePrebuilt && engineKey) {
+        warnings.push(msg("plan.prebuiltUnavailable", { package: pkg.name, version: v.version, engine: engineKey }));
+      }
+      work.set(key(name), {
+        name: pkg.name, version: v.version, enabled: false, ubot: true, requires: v.requires ?? [], enginePlugins: v.enginePlugins ?? [],
+        provides: v.provides ?? [], location, kind: binary ? "prebuilt" : "git", builtFor: binary ? engineKey : null, hasBinaries: !!binary
+      });
       resolve(pkg.name, v.requires ?? [], v.enginePlugins ?? []);
-      downloads.push(step("download", "clone", msg("step.clone", { package: pkg.name, version: v.version }),
-        msg("step.clone.detail", { repo: displayRepo(pkg.repository ?? ""), dest: location })));
+      if (binary) {
+        downloads.push(downloadStep(pkg.name, v.version, binary, location, false));
+      } else {
+        fetched.add(key(name));
+        downloads.push(step("download", "clone", msg("step.clone", { package: pkg.name, version: v.version }),
+          msg("step.clone.detail", { repo: displayRepo(pkg.repository ?? ""), dest: location })));
+      }
       const entry = work.get(key(name));
       if (entry) entry.enabled = true;
       enables.push(step("project", "enablePackage", msg("step.enablePackage", { package: pkg.name }),
@@ -592,7 +701,14 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
       const pkg = indexPackage(name);
       const v = pkg?.versions.find((x) => x.version === version && !x.planned);
       if (!pkg || !v) { errors.push(msg("plan.noVersion", { package: inst.name, range: version })); return; }
-      if (inst.version === version) return;
+      // The same version changes nothing, except for a prebuilt install, which is downloaded again (fix.reinstall).
+      if (inst.version === version && inst.kind !== "prebuilt") return;
+      // A git checkout checks the version out; a prebuilt or copied folder is replaced by the prebuilt zip.
+      const binary = inst.kind === "git" ? null : prebuiltFor(pkg.name, version);
+      if (inst.kind !== "git" && !binary) {
+        errors.push(msg("plan.noPrebuilt", { package: inst.name, version, engine: engineKey }));
+        return;
+      }
       for (const dependent of dependentsOf(name)) {
         if (key(dependent.name) === key(requiredBy ?? "")) continue;
         const r = dependent.requires.find((x) => key(x.name) === key(name));
@@ -604,9 +720,16 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
       inst.version = version;
       inst.requires = v.requires ?? [];
       inst.enginePlugins = v.enginePlugins ?? [];
+      inst.provides = v.provides ?? [];
       resolve(inst.name, inst.requires, inst.enginePlugins);
-      downloads.push(step("download", "checkout", msg("step.checkout", { package: inst.name, version }),
-        msg("step.checkout.detail", { from: `v${from}`, to: v.ref ?? `v${version}` })));
+      if (binary) {
+        Object.assign(inst, { kind: "prebuilt", builtFor: engineKey, hasBinaries: true });
+        downloads.push(downloadStep(inst.name, version, binary, inst.location, true));
+      } else {
+        fetched.add(key(name));
+        downloads.push(step("download", "checkout", msg("step.checkout", { package: inst.name, version }),
+          msg("step.checkout.detail", { from: `v${from}`, to: v.ref ?? `v${version}` })));
+      }
       touch(inst.name);
     }
 
@@ -675,18 +798,21 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     }
 
     const drafts: Draft[] = [...downloads, ...enginePluginSteps, ...enables, ...disables, ...removes];
-    const needsBuild = options.build && drafts.some((d) => d.kind === "clone" || d.kind === "checkout" || d.kind === "enablePackage" || d.kind === "enableEnginePlugin");
+    // Only source code needs a build: a package enabled afterwards that is not prebuilt and was cloned or checked out
+    // here, or has no binaries yet. A plan whose code all comes prebuilt has no build step.
+    const needsBuild = options.build && drafts.length > 0 && [...work.values()].some((w) =>
+      w.ubot && w.enabled && w.kind !== "prebuilt" && (fetched.has(key(w.name)) || !w.hasBinaries));
     if (needsBuild) {
       drafts.push(step("build", "build", msg("step.build", { target: `${p.name}Editor` }),
         msg("step.build.detail", { platform: "Win64", configuration: settings.build.configuration })));
     }
-    if (options.runTests && needsBuild && touched.length > 0) {
+    if (options.runTests && touched.length > 0) {
       drafts.push(step("after", "runTests", msg("step.runTests"), msg("step.runTests.detail", { filter: touched.join("+") })));
     }
     if (options.reopenEditor && drafts.length > 0 && (p.editorRunning || needsBuild)) {
       drafts.push(step("after", "openEditor", msg("step.openEditor"), msg("step.openEditor.detail", { project: file })));
     }
-    const steps: PlanStep[] = drafts.map((d, i) => ({ ...d, id: `s${i + 1}`, n: i + 1, needsEditorClosed: d.kind !== "clone" }));
+    const steps: PlanStep[] = drafts.map((d, i) => ({ ...d, id: `s${i + 1}`, n: i + 1 }));
     return { changes, steps, needsBuild, editorRunning: p.editorRunning, errors, warnings };
   }
 
@@ -781,7 +907,72 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
       case "openEditor":
         return [`Started UnrealEditor.exe "${p?.path}" (PID 23512)`];
       case "build":
+      case "download":
         return [];
+    }
+  }
+
+  /** The zip a download step fetches (the version's binaries for the project's engine). */
+  function downloadOf(planStep: PlanStep): { binary: IndexBinary; dest: string; temp: string; replaces: boolean } | null {
+    const p = project;
+    const name = planStep.title.params["package"] ?? "";
+    const version = planStep.title.params["version"] ?? "";
+    const engineKey = engineMajorMinor(engine()?.version) ?? "";
+    const pkg = indexPackage(name);
+    const binary = pkg?.versions.find((v) => v.version === version)?.binaries?.[engineKey]?.[PREBUILT_PLATFORM];
+    if (!p || !pkg || !binary) return null;
+    const windows = (path: string) => path.replace(/\//g, "\\");
+    const inst = p.installed.get(key(name));
+    const location = inst?.location ?? `${settings.install.directory}/${folderOf(pkg)}`;
+    const dest = `${p.dir}\\${windows(location)}`;
+    const parent = dest.slice(0, dest.lastIndexOf("\\"));
+    return { binary, dest, temp: parent, replaces: !!inst };
+  }
+
+  /** Streams a prebuilt zip: byte progress on the step, then verify, extract and swap it into place. */
+  async function runDownload(run: RunState, planStep: PlanStep, taskStep: TaskStep): Promise<void> {
+    const task = run.task;
+    const name = planStep.title.params["package"] ?? "";
+    const version = planStep.title.params["version"] ?? "";
+    const target = downloadOf(planStep);
+    const total = target?.binary.size ?? 32 * MEGABYTE;
+    const part = `${target?.temp ?? ""}\\.ubot-download-${name}.zip.part`;
+    const mb = (bytes: number) => (bytes / MEGABYTE).toFixed(1);
+    let done = taskStep.progress?.done ?? 0;
+    if (done === 0) {
+      pushLog(task, taskStep.id, [`GET ${target?.binary.url ?? ""}`, `Saving to ${part} (${mb(total)} MB)`]);
+    }
+    taskStep.progress = { done, total };
+    emitTask(task);
+    while (done < total) {
+      await delay(DOWNLOAD_TICK_MS);
+      if (run.canceled) {
+        pushLog(task, taskStep.id, [`Canceled; deleted ${part}`]);
+        return;
+      }
+      const before = Math.floor((done / total) * 4);
+      done = Math.min(total, done + run.downloadBytesPerTick);
+      if (Math.floor((done / total) * 4) > before && done < total) {
+        pushLog(task, taskStep.id, [`Received ${mb(done)} of ${mb(total)} MB`]);
+      }
+      taskStep.progress = { done, total };
+      emitTask(task);
+    }
+    const extract = `${target?.temp ?? ""}\\.ubot-extract-${name}`;
+    const dest = target?.dest ?? "";
+    const lines = [
+      `Received ${mb(total)} of ${mb(total)} MB`,
+      `SHA-256 ${target?.binary.sha256 ?? ""} verified`,
+      `Extracting ${name}/ to ${extract}`,
+      `${name}.uplugin: VersionName ${version}`,
+      ...(target?.replaces ? [`Moved ${dest} to the Recycle Bin`] : []),
+      `Renamed ${extract} to ${dest}`,
+      `Wrote ${dest}\\.ubot-install.json (prebuilt, UE ${engineMajorMinor(engine()?.version) ?? ""}, ${PREBUILT_PLATFORM})`
+    ];
+    for (const line of lines) {
+      await delay(120);
+      if (run.canceled) return;
+      pushLog(task, taskStep.id, [line]);
     }
   }
 
@@ -798,7 +989,8 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
           p.installed.set(key(name), {
             name: pkg.name, version: v.version, enabled: false, ubot: true,
             location: `${settings.install.directory}/${folderOf(pkg)}`,
-            requires: clone(v.requires ?? []), enginePlugins: clone(v.enginePlugins ?? []), provides: clone(v.provides ?? [])
+            requires: clone(v.requires ?? []), enginePlugins: clone(v.enginePlugins ?? []), provides: clone(v.provides ?? []),
+            kind: "git", builtFor: null, hasBinaries: false
           });
         }
         break;
@@ -811,9 +1003,26 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
           inst.requires = clone(v.requires ?? []);
           inst.enginePlugins = clone(v.enginePlugins ?? []);
           inst.provides = clone(v.provides ?? []);
+          inst.hasBinaries = false;
         }
         break;
       }
+      case "download": {
+        const pkg = indexPackage(name);
+        const v = pkg?.versions.find((x) => x.version === params["version"]);
+        if (!pkg || !v) break;
+        const inst = p.installed.get(key(name));
+        const fields = {
+          version: v.version, requires: clone(v.requires ?? []), enginePlugins: clone(v.enginePlugins ?? []), provides: clone(v.provides ?? []),
+          kind: "prebuilt" as const, builtFor: engineMajorMinor(engine()?.version), hasBinaries: true
+        };
+        if (inst) Object.assign(inst, fields);
+        else p.installed.set(key(name), { name: pkg.name, enabled: false, ubot: true, location: `${settings.install.directory}/${folderOf(pkg)}`, ...fields });
+        break;
+      }
+      case "build":
+        for (const inst of p.installed.values()) if (inst.enabled) inst.hasBinaries = true;
+        break;
       case "enablePackage": {
         const inst = p.installed.get(key(name));
         if (inst) inst.enabled = true;
@@ -841,6 +1050,10 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
 
   async function runStep(run: RunState, planStep: PlanStep, taskStep: TaskStep): Promise<void> {
     const task = run.task;
+    if (planStep.kind === "download") {
+      await runDownload(run, planStep, taskStep);
+      return;
+    }
     if (planStep.kind === "build") {
       const actions = buildActions(task.changes.length > 0 ? touchedPackages(run.plan) : []);
       const already = taskStep.progress?.done ?? 0;
@@ -872,9 +1085,11 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     }
   }
 
+  /** The source packages a build compiles: cloned, checked out or enabled ones that did not come prebuilt. */
   function touchedPackages(p: Plan): string[] {
     return p.steps.filter((s) => s.kind === "clone" || s.kind === "checkout" || s.kind === "enablePackage")
-      .map((s) => s.title.params["package"] ?? "").filter((n, i, all) => n && all.indexOf(n) === i && indexPackage(n));
+      .map((s) => s.title.params["package"] ?? "")
+      .filter((n, i, all) => n && all.indexOf(n) === i && indexPackage(n) && project?.installed.get(key(n))?.kind !== "prebuilt");
   }
 
   async function runTask(run: RunState, startAt = 0): Promise<void> {
@@ -946,7 +1161,9 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     emitSnapshot();
   }
 
-  function startTask(planned: Plan, options: ApplyOptions, title: Msg | null, saveRecipe: string | null, buildLineMs: number): RunState {
+  function startTask(
+    planned: Plan, options: ApplyOptions, title: Msg | null, saveRecipe: string | null, buildLineMs: number, downloadBytesPerTick: number
+  ): RunState {
     const task: Task = {
       id: `task-${++taskCounter}`,
       title: title ?? { code: "task.apply", params: { project: project?.name ?? "" } },
@@ -961,7 +1178,7 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     };
     tasks.unshift(task);
     if (tasks.length > 30) tasks.length = 30;
-    const run: RunState = { task, plan: planned, options, saveRecipe, canceled: false, buildLineMs };
+    const run: RunState = { task, plan: planned, options, saveRecipe, canceled: false, buildLineMs, downloadBytesPerTick };
     running = run;
     return run;
   }
@@ -1002,12 +1219,38 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     task.steps.forEach((s) => { s.logLines = logs.get(`task-0/${s.id}`)?.length ?? 0; });
   })();
 
-  // Design screenshot of the Tasks view: the UBotVehicles install is building, 15 of 24 actions done.
-  if (params.view === "tasks" && project) {
+  // Screenshot of the Tasks view: the UBotVehicles install is downloading its prebuilt zip (slowly, so it stays in
+  // progress), or with `prebuilt=0` it is building, 15 of 24 actions done (the Build design).
+  if (params.view === "tasks" && project && settings.install.usePrebuilt) {
     const options: ApplyOptions = { build: true, reopenEditor: true, runTests: false };
     const planned = plan([{ kind: "install", package: "UBotVehicles", version: "0.1.0" }], options);
     project.editorRunning = false;
-    const run = startTask(planned, options, null, null, 4000);
+    const run = startTask(planned, options, null, null, 4000, MEGABYTE / 8);
+    const task = run.task;
+    const begin = Date.now() - 19_000;
+    task.startedAt = new Date(begin).toISOString();
+    const planStep = planned.steps[0];
+    const downloadStep = task.steps[0];
+    const target = planStep ? downloadOf(planStep) : null;
+    if (planStep && downloadStep && target) {
+      const total = target.binary.size ?? 32 * MEGABYTE;
+      const done = Math.round(total * 0.27);
+      downloadStep.status = "running";
+      downloadStep.startedAt = task.startedAt;
+      pushLog(task, downloadStep.id, [
+        `GET ${target.binary.url}`,
+        `Saving to ${target.temp}\\.ubot-download-UBotVehicles.zip.part (${(total / MEGABYTE).toFixed(1)} MB)`,
+        `Received ${(total / 4 / MEGABYTE).toFixed(1)} of ${(total / MEGABYTE).toFixed(1)} MB`
+      ]);
+      downloadStep.progress = { done, total };
+    }
+    task.status = "running";
+    void runTask(run, 0);
+  } else if (params.view === "tasks" && project) {
+    const options: ApplyOptions = { build: true, reopenEditor: true, runTests: false };
+    const planned = plan([{ kind: "install", package: "UBotVehicles", version: "0.1.0" }], options);
+    project.editorRunning = false;
+    const run = startTask(planned, options, null, null, 4000, 3 * MEGABYTE);
     const task = run.task;
     const begin = Date.now() - 72_000;
     task.startedAt = new Date(begin).toISOString();
@@ -1079,7 +1322,8 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
       const planned = plan(changes, options);
       // One English message per line, like the core; the UI translates each line.
       if (planned.errors.length > 0) throw new Error(planned.errors.map((m) => renderMsg("en", m)).join("\n"));
-      const run = startTask(planned, options, title, saveRecipe, 320);
+      // About 4 s for a 45 MB zip.
+      const run = startTask(planned, options, title, saveRecipe, 320, 3 * MEGABYTE);
       emitTask(run.task);
       void runTask(run);
       return run.task.id;

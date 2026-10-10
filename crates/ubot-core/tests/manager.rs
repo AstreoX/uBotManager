@@ -61,7 +61,7 @@ const INDEX: &str = r#"{
 
 fn descriptor(version: &str, layer: &str, requires: &str) -> String {
     format!(
-        r#"{{ "FileVersion": 3, "VersionName": "{version}", "UBot": {{ "Layer": "{layer}", "Requires": [ {requires} ] }} }}"#
+        r#"{{ "FileVersion": 3, "VersionName": "{version}", "Modules": [ {{ "Name": "M", "Type": "Runtime" }} ], "UBot": {{ "Layer": "{layer}", "Requires": [ {requires} ] }} }}"#
     )
 }
 
@@ -279,5 +279,57 @@ fn facade_round_trip() {
     assert!(
         !snapshot.problems.iter().any(|p| p.id == "engine"),
         "ignored problems stay ignored"
+    );
+}
+
+/// The index file for the UE panel lives in the project folder: UE clones with the repository
+/// URLs (credentials kept), but it ignores `binaries`, whose URLs must not leave secrets there.
+#[test]
+fn the_panel_index_keeps_repository_credentials_but_not_binaries_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project_dir = root.join("Sim");
+    let uproject = project_dir.join("Sim.uproject");
+    write(&uproject, "{\n    \"FileVersion\": 3\n}\n");
+    let index = r#"{
+        "formatVersion": 2, "name": "test",
+        "packages": [
+            { "name": "UBotCore", "description": { "en": "Core", "zh-CN": "核心" }, "layer": "Foundation",
+              "repository": "https://user:REPOTOKEN@example.com/uBotCore.git",
+              "versions": [ { "version": "0.1.0", "ref": "v0.1.0",
+                  "binaries": { "5.5": { "Win64": {
+                      "url": "https://u:SECRETPW@example.com/dl/UBotCore.zip?sig=SECRETSIG",
+                      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } } } } ] }
+        ]
+    }"#;
+    let index_path = root.join("index.json");
+    fs::write(&index_path, index).unwrap();
+    let home = root.join("home");
+    write(
+        &home.join("settings.json"),
+        r#"{ "ros": { "checkOnRefresh": false } }"#,
+    );
+    let manager = Manager::new(ManagerOptions {
+        dirs: AppDirs::under(home),
+        offline: true,
+        index_override: Some(vec![index_path.to_string_lossy().into_owned()]),
+        write_merged_index: true,
+        remover: Arc::new(PermanentDelete),
+        engine_registry: Arc::new(NoEngines),
+        ..ManagerOptions::default()
+    });
+    manager.open_project(&uproject.to_string_lossy()).unwrap();
+    let panel = fs::read_to_string(project_dir.join("Saved/uBot/index.json")).unwrap();
+    assert!(
+        !panel.contains("SECRETPW") && !panel.contains("SECRETSIG"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("https://***@example.com/dl/UBotCore.zip"),
+        "{panel}"
+    );
+    assert!(
+        panel.contains("https://user:REPOTOKEN@example.com/uBotCore.git"),
+        "UE clones with the repository URL as written: {panel}"
     );
 }

@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::model::{Layer, LocalizedText};
 use crate::url::{
-    check_repository_url, is_safe_folder_name, redact_credentials, repository_folder_name,
-    UrlVerdict,
+    check_binary_url, check_repository_url, is_safe_folder_name, redact_credentials,
+    repository_folder_name, strip_url_secrets, UrlVerdict,
 };
 use crate::version::{Constraint, SemVer};
 
@@ -16,6 +16,173 @@ pub const FORMAT_VERSION: u64 = 2;
 
 /// Check ids a recipe may list; others are ignored (and reported as warnings by validation).
 pub const KNOWN_RECIPE_CHECKS: &[&str] = &["rosBridge"];
+
+/// The platforms of `binaries` the manager installs; other platform keys are ignored.
+pub const BINARY_PLATFORMS: &[&str] = &["Win64"];
+
+/// A prebuilt archive is never larger than this (an exact `size` may set a lower limit).
+pub const MAX_BINARY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+const BINARY_KEYS: &[&str] = &["url", "sha256", "size"];
+
+/// One `binaries[engine][platform]` entry of a version: a zip of the built plugin (SPEC §1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrebuiltBinary {
+    /// `https://`, `file://` or an absolute local path.
+    pub url: String,
+    /// SHA-256 of the archive, 64 lower-case hex digits.
+    pub sha256: String,
+    /// The exact size of the archive in bytes, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// `Major.Minor`, the engine keys of `binaries` ("5.5").
+pub fn is_engine_key(key: &str) -> bool {
+    match key.split_once('.') {
+        Some((major, minor)) => {
+            !major.is_empty()
+                && !minor.is_empty()
+                && major.bytes().all(|b| b.is_ascii_digit())
+                && minor.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+/// 64 lower-case hex digits.
+pub fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Reads one `binaries[engine][platform]` entry. `Err` lists what is wrong with it; the
+/// unknown keys of a usable entry come back with it (validation warns about them).
+pub fn parse_binary(value: &Value) -> Result<(PrebuiltBinary, Vec<String>), String> {
+    let Some(object) = value.as_object() else {
+        return Err("must be an object with \"url\" and \"sha256\"".into());
+    };
+    let mut problems = Vec::new();
+    let url = match object.get("url") {
+        Some(Value::String(url)) => {
+            if let Err(reason) = check_binary_url(url) {
+                problems.push(format!(
+                    "url '{}' is not allowed: {reason}",
+                    redact_credentials(url)
+                ));
+            }
+            url.clone()
+        }
+        Some(_) => {
+            problems.push("\"url\" is not a string".to_string());
+            String::new()
+        }
+        None => {
+            problems.push("\"url\" is missing".to_string());
+            String::new()
+        }
+    };
+    let sha256 = match object.get("sha256") {
+        Some(Value::String(sha256)) if is_sha256_hex(sha256) => sha256.clone(),
+        Some(_) => {
+            problems.push("\"sha256\" must be 64 lower-case hex digits".to_string());
+            String::new()
+        }
+        None => {
+            problems.push("\"sha256\" is missing".to_string());
+            String::new()
+        }
+    };
+    let size = match object.get("size") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64() {
+            Some(size) if size > 0 && size <= MAX_BINARY_BYTES => Some(size),
+            Some(size) if size > MAX_BINARY_BYTES => {
+                problems.push(format!(
+                    "\"size\" {size} is over the limit of {MAX_BINARY_BYTES} bytes"
+                ));
+                None
+            }
+            _ => {
+                problems.push("\"size\" must be a positive number of bytes".to_string());
+                None
+            }
+        },
+    };
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+    let unknown = object
+        .keys()
+        .filter(|key| !BINARY_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    Ok((PrebuiltBinary { url, sha256, size }, unknown))
+}
+
+/// Checks a version's `binaries` (null is fine): errors and warnings, each prefixed with `at`
+/// and the place inside `binaries`.
+fn check_binaries(value: &Value, at: &str, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+    let engines = match value {
+        Value::Null => return,
+        Value::Object(engines) => engines,
+        _ => {
+            errors.push(format!(
+                "{at}.binaries: must be an object of engine versions (\"5.5\") or null."
+            ));
+            return;
+        }
+    };
+    for (engine, platforms) in engines {
+        let eat = format!("{at}.binaries[\"{engine}\"]");
+        if !is_engine_key(engine) {
+            errors.push(format!(
+                "{eat}: '{engine}' is not an engine version like \"5.5\" (Major.Minor)."
+            ));
+            continue;
+        }
+        let Some(platforms) = platforms.as_object() else {
+            errors.push(format!(
+                "{eat}: must be an object of platforms (\"Win64\")."
+            ));
+            continue;
+        };
+        for (platform, entry) in platforms {
+            let pat = format!("{eat}[\"{platform}\"]");
+            if !BINARY_PLATFORMS.contains(&platform.as_str()) {
+                warnings.push(format!(
+                    "{pat}: unknown platform '{platform}' is ignored (only Win64 is installed)."
+                ));
+                continue;
+            }
+            match parse_binary(entry) {
+                Ok((_, unknown)) => {
+                    for key in unknown {
+                        warnings.push(format!("{pat}: unknown key \"{key}\" is ignored."));
+                    }
+                }
+                Err(problems) => errors.push(format!("{pat}: {problems}.")),
+            }
+        }
+    }
+}
+
+/// Removes credentials, query and fragment from the `url`s of a `binaries` value: signed download
+/// links keep their tokens in the query.
+fn redact_binaries(value: &mut Value) {
+    let Some(engines) = value.as_object_mut() else {
+        return;
+    };
+    for platforms in engines.values_mut() {
+        let Some(platforms) = platforms.as_object_mut() else {
+            continue;
+        };
+        for entry in platforms.values_mut() {
+            if let Some(Value::String(url)) = entry.get_mut("url") {
+                *url = strip_url_secrets(url);
+            }
+        }
+    }
+}
 
 /// Localized text in the index: "en" is required, any other locale is optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +231,9 @@ pub struct IndexVersion {
     pub engine_plugins: Vec<String>,
     #[serde(default)]
     pub provides: Vec<String>,
-    /// Reserved for prebuilt binaries; ignored.
+    /// Prebuilt binaries: `{ "<Major.Minor>": { "<platform>": PrebuiltBinary } }`. Kept as written
+    /// (a malformed entry does not make the index unreadable; validation reports it, and
+    /// [`IndexVersion::prebuilt`] only returns usable entries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Value>,
 }
@@ -72,6 +241,22 @@ pub struct IndexVersion {
 impl IndexVersion {
     pub fn semver(&self) -> Option<SemVer> {
         SemVer::parse(&self.version)
+    }
+
+    /// The prebuilt binaries of this version for an engine (`Major.Minor`) and platform, when the
+    /// index has a usable entry for them (URL policy, SHA-256 and size checked).
+    pub fn prebuilt(&self, engine: &str, platform: &str) -> Option<PrebuiltBinary> {
+        if self.planned || !is_engine_key(engine) {
+            return None;
+        }
+        let entry = self
+            .binaries
+            .as_ref()?
+            .as_object()?
+            .get(engine)?
+            .as_object()?
+            .get(platform)?;
+        parse_binary(entry).ok().map(|(binary, _)| binary)
     }
 }
 
@@ -226,8 +411,8 @@ impl IndexFile {
     }
 
     /// A copy whose URLs have their credentials removed (`https://user:token@host` becomes
-    /// `https://***@host`), for output that is shown or logged. The file the editor reads
-    /// (`Saved/uBot/index.json`) keeps the real URLs because UE needs them to clone.
+    /// `https://***@host`; binaries URLs also lose their query), for output that is shown or
+    /// logged.
     pub fn redacted(&self) -> IndexFile {
         let mut file = self.clone();
         for package in &mut file.packages {
@@ -236,6 +421,28 @@ impl IndexFile {
                 .flatten()
             {
                 *url = redact_credentials(url);
+            }
+            for version in &mut package.versions {
+                if let Some(binaries) = &mut version.binaries {
+                    redact_binaries(binaries);
+                }
+            }
+        }
+        file
+    }
+}
+
+impl IndexFile {
+    /// A copy for the file the UE panel reads (`Saved/uBot/index.json`, SPEC §1.1). Repository
+    /// and docs URLs are kept as written, because UE clones with them; `binaries` URLs are
+    /// redacted, because UE ignores `binaries` and the file lives in the project folder.
+    pub fn for_panel(&self) -> IndexFile {
+        let mut file = self.clone();
+        for package in &mut file.packages {
+            for version in &mut package.versions {
+                if let Some(binaries) = &mut version.binaries {
+                    redact_binaries(binaries);
+                }
             }
         }
         file
@@ -493,6 +700,12 @@ pub fn validate(index: &IndexFile, raw: Option<&Value>) -> Validation {
         let mut seen_versions: Vec<SemVer> = Vec::new();
         for (version_position, version) in package.versions.iter().enumerate() {
             let vat = format!("{at}.versions[{version_position}]");
+            if !is_safe_version_text(&version.version) {
+                errors.push(format!(
+                    "{vat}: version '{}' may only contain letters, digits, '.', '-' and '+'.",
+                    version.version
+                ));
+            }
             match version.semver() {
                 None => errors.push(format!("{vat}: '{}' is not a version.", version.version)),
                 Some(semver) => {
@@ -542,6 +755,12 @@ pub fn validate(index: &IndexFile, raw: Option<&Value>) -> Validation {
                         "{vat}.enginePlugins: '{plugin}' is not a valid plugin name."
                     ));
                 }
+            }
+            if let Some(binaries) = &version.binaries {
+                if version.planned && !binaries.is_null() {
+                    warnings.push(format!("{vat}: planned versions ignore \"binaries\"."));
+                }
+                check_binaries(binaries, &vat, errors, warnings);
             }
         }
     }
@@ -640,6 +859,17 @@ pub fn is_safe_ref(git_ref: &str) -> bool {
                 && !c.is_control()
                 && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '"')
         })
+}
+
+/// A version string that is safe where it becomes part of a file name or a URL (an archive name,
+/// a download URL template): letters, digits, `.`, `-` and `+` only. SemVer parsing ignores
+/// everything after `+`, so this is what keeps `1.0.0+x/../../y` out. Same rule as the `version`
+/// pattern of `index.schema.json`.
+pub fn is_safe_version_text(version: &str) -> bool {
+    !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 /// A dependency cycle among the packages, using the latest (or planned) version of each.
@@ -995,6 +1225,220 @@ mod tests {
                 "missing warning '{fragment}' in:\n{warnings}"
             );
         }
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn with_binaries(binaries: &str) -> String {
+        format!(
+            r#"{{ "formatVersion": 2, "name": "t", "packages": [
+                {{ "name": "A", "description": {{ "en": "a", "zh-CN": "a" }}, "layer": "Content",
+                  "repository": "https://h/a.git",
+                  "versions": [ {{ "version": "1.0.0", "ref": "v1", "binaries": {binaries} }} ] }} ] }}"#
+        )
+    }
+
+    #[test]
+    fn version_text_is_safe_in_file_names() {
+        for good in ["0.1.0", "v1.2.3-rc.1+build.5", "1", "2.0.0+20260101"] {
+            assert!(is_safe_version_text(good), "{good}");
+        }
+        for bad in [
+            "",
+            " 0.1.0 ",
+            "1.0.0+x/../../pwn",
+            "1.0.0+x\\y",
+            "1.0.0 beta",
+            "1.0.0:x",
+            "1.0.0%2f",
+            "1.0.0\u{e9}",
+        ] {
+            assert!(!is_safe_version_text(bad), "{bad:?}");
+        }
+        let one_version = |version: &str| {
+            format!(
+                r#"{{ "formatVersion": 2, "name": "t", "packages": [
+                    {{ "name": "A", "description": {{ "en": "a", "zh-CN": "a" }}, "layer": "Content",
+                      "repository": "https://h/a.git",
+                      "versions": [ {{ "version": "{version}", "ref": "v1" }} ] }} ] }}"#
+            )
+        };
+        for version in ["1.0.0+x/../../pwn", " 0.1.0 "] {
+            let errors = validate_text(&one_version(version)).errors.join("\n");
+            assert!(
+                errors.contains("may only contain letters, digits"),
+                "{version:?}: {errors}"
+            );
+        }
+        for good in ["0.1.0", "v1.2.3-rc.1+build.5"] {
+            let validation = validate_text(&one_version(good));
+            assert!(
+                validation.errors.is_empty(),
+                "{good}: {:?}",
+                validation.errors
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_copy_keeps_repository_credentials_but_not_binaries_secrets() {
+        let text = with_binaries(&format!(
+            r#"{{ "5.5": {{ "Win64": {{ "url": "https://u:SECRETPW@h/x.zip?sig=SECRETSIG", "sha256": "{SHA}" }} }} }}"#
+        ))
+        .replace("https://h/a.git", "https://user:REPOTOKEN@h/a.git");
+        let index = parse(&text).unwrap();
+        let panel = index.for_panel().to_json();
+        assert!(
+            !panel.contains("SECRETPW") && !panel.contains("SECRETSIG"),
+            "{panel}"
+        );
+        assert!(panel.contains("https://***@h/x.zip"), "{panel}");
+        assert!(panel.contains("REPOTOKEN"), "UE clones with these: {panel}");
+        let shown = index.redacted().to_json();
+        assert!(
+            !shown.contains("REPOTOKEN") && !shown.contains("SECRETSIG"),
+            "{shown}"
+        );
+        assert!(
+            index.to_json().contains("SECRETSIG"),
+            "the original is untouched"
+        );
+    }
+
+    #[test]
+    fn binaries_are_read_and_validated() {
+        let good = format!(
+            r#"{{ "5.5": {{ "Win64": {{ "url": "https://github.com/AstreoX/uBotA/releases/download/v1/A-1.0.0-UE5.5-Win64.zip", "sha256": "{SHA}", "size": 4096 }} }},
+                 "5.6": {{ "Win64": {{ "url": "file:///D:/mirror/A.zip", "sha256": "{SHA}" }} }},
+                 "5.7": {{ "Win64": {{ "url": "D:\\mirror\\A.zip", "sha256": "{SHA}" }} }} }}"#
+        );
+        let text = with_binaries(&good);
+        let validation = validate_text(&text);
+        assert!(validation.errors.is_empty(), "{:#?}", validation.errors);
+        assert!(validation.warnings.is_empty(), "{:#?}", validation.warnings);
+        let index = parse(&text).unwrap();
+        let version = index.find("A").unwrap().latest().unwrap();
+        let binary = version.prebuilt("5.5", "Win64").unwrap();
+        assert_eq!(binary.sha256, SHA);
+        assert_eq!(binary.size, Some(4096));
+        assert_eq!(
+            version.prebuilt("5.6", "Win64").unwrap().url,
+            "file:///D:/mirror/A.zip"
+        );
+        assert_eq!(version.prebuilt("5.7", "Win64").unwrap().size, None);
+        assert!(version.prebuilt("5.4", "Win64").is_none());
+        assert!(version.prebuilt("5.5", "Linux").is_none());
+        // The merged index keeps the entries as written.
+        let merged = MergedIndex::merge(&[SourceIndex {
+            id: "t".into(),
+            index: index.clone(),
+        }]);
+        let reparsed = parse(&merged.to_file().to_json()).unwrap();
+        assert_eq!(
+            reparsed.find("A").unwrap().versions[0].binaries,
+            index.find("A").unwrap().versions[0].binaries
+        );
+
+        // null and absent are "no binaries".
+        assert!(validate_text(&with_binaries("null")).errors.is_empty());
+        let none = parse(&with_binaries("null")).unwrap();
+        assert!(none.find("A").unwrap().versions[0]
+            .prebuilt("5.5", "Win64")
+            .is_none());
+
+        let bad = format!(
+            r#"{{ "5": {{ "Win64": {{ "url": "https://h/x.zip", "sha256": "{SHA}" }} }},
+                 "5.5.1": {{}},
+                 "five": {{}},
+                 "5.4": {{ "Win64": {{ "url": "http://h/x.zip", "sha256": "{SHA}" }} }},
+                 "5.3": {{ "Win64": {{ "url": "https://h/x.zip", "sha256": "{upper}" }} }},
+                 "5.2": {{ "Win64": {{ "url": "https://h/x.zip", "sha256": "abc" }} }},
+                 "5.1": {{ "Win64": {{ "sha256": "{SHA}" }} }},
+                 "5.0": {{ "Win64": {{ "url": "git@h:x.zip", "sha256": "{SHA}", "size": 0 }} }},
+                 "3.9": {{ "Win64": {{ "url": "https://evil.example.net\\@trusted.example.com/a.zip", "sha256": "{SHA}" }} }},
+                 "4.27": {{ "Win64": {{ "url": "relative/x.zip", "sha256": "{SHA}", "size": 3000000000 }} }},
+                 "4.26": "x",
+                 "4.25": {{ "Win64": "x", "Linux": {{ "url": "https://h/l.zip", "sha256": "{SHA}" }} }},
+                 "4.24": {{ "Win64": {{ "url": "https://user:SECRET@h/x.zip", "sha256": "{SHA}", "mirror": "y" }} }} }}"#,
+            upper = SHA.to_uppercase()
+        );
+        let validation = validate_text(&with_binaries(&bad));
+        let errors = validation.errors.join("\n");
+        let warnings = validation.warnings.join("\n");
+        for fragment in [
+            "binaries[\"5\"]: '5' is not an engine version",
+            "binaries[\"5.5.1\"]: '5.5.1' is not an engine version",
+            "binaries[\"five\"]",
+            "binaries[\"5.4\"][\"Win64\"]: url 'http://h/x.zip' is not allowed: plain http://",
+            "binaries[\"5.3\"][\"Win64\"]: \"sha256\" must be 64 lower-case hex digits",
+            "binaries[\"5.2\"][\"Win64\"]: \"sha256\" must be 64",
+            "binaries[\"5.1\"][\"Win64\"]: \"url\" is missing",
+            "binaries[\"5.0\"][\"Win64\"]: url 'git@h:x.zip' is not allowed",
+            "\"size\" must be a positive number of bytes",
+            "url 'relative/x.zip' is not allowed",
+            "\"size\" 3000000000 is over the limit",
+            "binaries[\"3.9\"][\"Win64\"]: url 'https://evil.example.net\\@trusted.example.com/a.zip' is not allowed: backslashes are not allowed",
+            "binaries[\"4.26\"]: must be an object of platforms",
+            "binaries[\"4.25\"][\"Win64\"]: must be an object",
+        ] {
+            assert!(
+                errors.contains(fragment),
+                "missing error '{fragment}' in:\n{errors}"
+            );
+        }
+        for fragment in [
+            "binaries[\"4.25\"][\"Linux\"]: unknown platform 'Linux' is ignored",
+            "binaries[\"4.24\"][\"Win64\"]: unknown key \"mirror\" is ignored",
+        ] {
+            assert!(
+                warnings.contains(fragment),
+                "missing warning '{fragment}' in:\n{warnings}"
+            );
+        }
+        assert!(!errors.contains("SECRET") && !warnings.contains("SECRET"));
+        let validation = validate_text(&with_binaries("[]"));
+        assert!(validation.errors[0].contains("binaries: must be an object"));
+
+        // The reader stays tolerant: a broken entry does not make the index unreadable, and
+        // only usable entries are offered.
+        let index = parse(&with_binaries(&bad)).unwrap();
+        let version = &index.find("A").unwrap().versions[0];
+        for engine in [
+            "5", "5.4", "5.3", "5.2", "5.1", "5.0", "4.27", "4.26", "4.25", "3.9",
+        ] {
+            assert!(version.prebuilt(engine, "Win64").is_none(), "{engine}");
+        }
+        assert!(
+            version.prebuilt("4.24", "Win64").is_some(),
+            "unknown keys are fine"
+        );
+        let redacted = index.redacted().to_json();
+        assert!(!redacted.contains("SECRET"), "{redacted}");
+        assert!(redacted.contains("https://***@h/x.zip"));
+
+        // Planned versions offer no binaries.
+        let planned = r#"{ "formatVersion": 2, "name": "t", "packages": [
+            { "name": "A", "description": { "en": "a", "zh-CN": "a" }, "layer": "Content",
+              "versions": [ { "version": "1.0.0", "planned": true,
+                              "binaries": { "5.5": { "Win64": { "url": "https://h/x.zip", "sha256": "SHA" } } } } ] } ] }"#
+            .replace("SHA", SHA);
+        let validation = validate_text(&planned);
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert!(validation
+            .warnings
+            .join("\n")
+            .contains("planned versions ignore \"binaries\""));
+        let index = parse(&planned).unwrap();
+        assert!(index.find("A").unwrap().versions[0]
+            .prebuilt("5.5", "Win64")
+            .is_none());
+
+        assert!(is_engine_key("5.5") && is_engine_key("10.12"));
+        for key in ["5", "5.", ".5", "5.5.1", "v5.5", "5.x", ""] {
+            assert!(!is_engine_key(key), "{key}");
+        }
+        assert!(is_sha256_hex(SHA));
+        assert!(!is_sha256_hex(&SHA.to_uppercase()) && !is_sha256_hex(&SHA[1..]));
     }
 
     #[test]

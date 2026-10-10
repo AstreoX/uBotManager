@@ -1,5 +1,6 @@
 import type { StepStatus, Task, TaskStep } from "../api/types";
-import { sameName } from "./format";
+import { hasKey, t, tm } from "../i18n";
+import { formatByteProgress, sameName } from "./format";
 
 export interface Selection { taskId: string; stepId: string | null }
 
@@ -40,6 +41,40 @@ export function runningStep(task: Task): TaskStep | undefined {
 /** The step a failed or canceled task stopped on. */
 export function stoppedStep(task: Task): TaskStep | undefined {
   return task.steps.find((s) => s.status === "failed" || s.status === "canceled");
+}
+
+/** A step that downloads prebuilt binaries: its progress counts bytes, not build actions. */
+export function isDownloadStep(step: Pick<TaskStep, "title">): boolean {
+  return step.title.code === "step.download";
+}
+
+/** What the status bar shows while a task runs: the step, how far it is, and that as text. */
+export interface TaskProgress {
+  text: string;
+  done: number;
+  total: number;
+  /** "15/24" (build actions or steps), "12.3 / 45.6 MB" (a download). */
+  count: string;
+  /** The total is not known yet (a download without a size): the bar runs without a fill. */
+  indeterminate: boolean;
+}
+
+export function taskProgress(task: Task): TaskProgress {
+  const index = task.steps.findIndex((s) => s.status === "running" || s.status === "waiting");
+  const step = index >= 0 ? task.steps[index] : undefined;
+  const steps = (done: number, text: string): TaskProgress =>
+    ({ text, done, total: task.steps.length, count: `${done}/${task.steps.length}`, indeterminate: false });
+  if (!step) return steps(0, tm(task.title));
+  let text: string;
+  if (step.status === "waiting") text = t("progress.waiting");
+  else if (hasKey(`progress.${step.title.code}`)) text = t(`progress.${step.title.code}`, step.title.params);
+  else text = tm(step.title);
+  const progress = step.progress;
+  if (!progress) return steps(index + 1, text);
+  if (isDownloadStep(step)) {
+    return { text, done: progress.done, total: progress.total, count: formatByteProgress(progress.done, progress.total), indeterminate: progress.total <= 0 };
+  }
+  return { text, done: progress.done, total: progress.total, count: `${progress.done}/${progress.total}`, indeterminate: false };
 }
 
 /**

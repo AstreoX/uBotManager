@@ -6,7 +6,8 @@ import { ChevronIcon, ErrorIcon, InfoIcon, SearchIcon, WarningIcon } from "../co
 import { OptionsMenu } from "../components/Menu";
 import { hasKey, localized, t, tm } from "../i18n";
 import {
-  defaultVersion, detailsKey, displayUrl, findChange, isInstalled, problemsFor, sameChange, sameName, versionChoices
+  changeWord, defaultVersion, detailsKey, displayUrl, findChange, installedFromText, isInstalled, problemsFor, sameChange, sameName,
+  versionChoices
 } from "../lib/format";
 import { compareVersionStrings } from "../lib/semver";
 import { canSwitchProject } from "../lib/tasks";
@@ -114,7 +115,7 @@ function PackageRow({ pkg, problems }: { pkg: PackageInfo; problems: Problem[] }
     metaClass = "meta update";
   }
   if (queued) {
-    meta = t(`packages.pending.${queued.kind}`);
+    meta = t(`packages.pending.${changeWord(queued, pkg)}`);
     metaClass = "meta pending";
   }
   const dim = pkg.state === "disabled" || pkg.state === "planned";
@@ -193,13 +194,14 @@ function PackageDetails({ pkg }: { pkg: PackageInfo }) {
   // A queued change (also one queued from a banner or the Problems view) shows the version it targets.
   const version = queuedVersion ?? picked;
   const label = stateLabel(pkg, problems);
+  const installedFrom = installedFromText(pkg);
 
   const queue = (change: Change) => actions.queue(change);
   const simple = (kind: Change["kind"]) => () => queue({ kind, package: pkg.name, version: null });
 
   let buttons: ActionButton[];
   if (queued) {
-    buttons = [{ label: t(`action.cancel.${queued.kind}`), run: () => actions.unqueue(pkg.name) }];
+    buttons = [{ label: t(`action.cancel.${changeWord(queued, pkg)}`), run: () => actions.unqueue(pkg.name) }];
   } else if (pkg.state === "planned") {
     buttons = [{ label: t("action.notAvailable"), disabled: true, run: () => undefined }];
   } else if (pkg.state === "notInstalled") {
@@ -268,8 +270,13 @@ function PackageDetails({ pkg }: { pkg: PackageInfo }) {
           <dl className="fields">
             <dt>{t("details.layer")}</dt><dd>{t(`layer.${pkg.layer}`)}</dd>
             <dt>{t("details.installed")}</dt><dd className="mono">{pkg.installedVersion ?? "—"}</dd>
-            <dt>{t("details.latest")}</dt><dd className="mono">{pkg.latestVersion ?? "—"}</dd>
+            <dt>{t("details.latest")}</dt>
+            <dd>
+              <span className="mono">{pkg.latestVersion ?? "—"}</span>
+              {!isInstalled(pkg) && pkg.prebuiltAvailable && <span className="field-note">{t("details.prebuiltNote")}</span>}
+            </dd>
             <dt>{t("details.location")}</dt><dd className="mono">{pkg.location ?? "—"}</dd>
+            <dt>{t("details.installedFrom")}</dt><dd>{installedFrom ?? "—"}</dd>
             <dt>{t("details.repository")}</dt>
             <dd>
               {pkg.webUrl ? (

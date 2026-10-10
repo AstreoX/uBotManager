@@ -2,6 +2,7 @@
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::git;
@@ -107,6 +108,24 @@ pub fn find_vs2022() -> Result<String, String> {
         .find(|line| !line.is_empty())
         .map(str::to_string)
         .ok_or_else(|| "Visual Studio 2022 is not installed".into())
+}
+
+/// Whether Visual Studio 2022 is installed, for planning (`plan.noCompiler`). vswhere takes a
+/// moment, so the answer is kept for a minute.
+pub fn vs2022_found() -> bool {
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    const KEEP: Duration = Duration::from_secs(60);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, found)) = *cache {
+        if at.elapsed() < KEEP {
+            return found;
+        }
+    }
+    let found = find_vs2022().is_ok();
+    *cache = Some((Instant::now(), found));
+    found
 }
 
 /// Runs the requested checks; unknown ids are ignored, `rosBridge` is reported as not checked.

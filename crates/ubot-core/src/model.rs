@@ -158,6 +158,28 @@ pub struct GitState {
     pub dirty: bool,
 }
 
+/// How an installed package got into the project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallKind {
+    /// A git checkout (`.git` exists).
+    Git,
+    /// Prebuilt binaries installed by the manager (a valid `.ubot-install.json` marker).
+    Prebuilt,
+    /// Neither: a folder copied in by hand, a zip, a shared project.
+    Other,
+}
+
+/// What the install marker of a prebuilt package says it was built for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrebuiltInfo {
+    /// `Major.Minor` of the engine the binaries were built for ("5.5").
+    pub engine: String,
+    /// "Win64".
+    pub platform: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
@@ -176,6 +198,13 @@ pub struct PackageInfo {
     pub location: Option<String>,
     /// `None` when not installed.
     pub git: Option<GitState>,
+    /// `None` when not installed.
+    pub install_kind: Option<InstallKind>,
+    /// An install or update of this package would use prebuilt binaries for this project now.
+    pub prebuilt_available: bool,
+    /// The engine and platform the installed binaries were built for, from the install marker:
+    /// set exactly when `install_kind` is `prebuilt`, `None` otherwise.
+    pub prebuilt: Option<PrebuiltInfo>,
     pub repository: Option<String>,
     pub web_url: Option<String>,
     pub docs_url: Option<String>,
@@ -390,6 +419,7 @@ pub enum StepGroup {
 pub enum StepKind {
     Clone,
     Checkout,
+    Download,
     EnablePackage,
     DisablePackage,
     EnableEnginePlugin,
@@ -665,6 +695,9 @@ mod tests {
                 git_ref: Some("v0.1.0".into()),
                 dirty: false,
             }),
+            install_kind: Some(InstallKind::Git),
+            prebuilt_available: false,
+            prebuilt: None,
             repository: None,
             web_url: None,
             docs_url: None,
@@ -812,6 +845,9 @@ mod tests {
                 "updateAvailable",
                 "location",
                 "git",
+                "installKind",
+                "prebuiltAvailable",
+                "prebuilt",
                 "repository",
                 "webUrl",
                 "docsUrl",
@@ -833,6 +869,24 @@ mod tests {
             package["git"],
             json!({ "isCheckout": true, "ref": "v0.1.0", "dirty": false })
         );
+        assert_eq!(package["installKind"], "git");
+        assert_eq!(package["prebuiltAvailable"], false);
+        assert_eq!(package["prebuilt"], Value::Null);
+        assert_eq!(
+            serde_json::to_value(PrebuiltInfo {
+                engine: "5.5".into(),
+                platform: "Win64".into()
+            })
+            .unwrap(),
+            json!({ "engine": "5.5", "platform": "Win64" })
+        );
+        for (kind, literal) in [
+            (InstallKind::Git, "git"),
+            (InstallKind::Prebuilt, "prebuilt"),
+            (InstallKind::Other, "other"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), literal);
+        }
         assert_eq!(
             keys(&package["requires"][0]),
             [
@@ -963,6 +1017,7 @@ mod tests {
         for (kind, literal) in [
             (StepKind::Clone, "clone"),
             (StepKind::Checkout, "checkout"),
+            (StepKind::Download, "download"),
             (StepKind::EnablePackage, "enablePackage"),
             (StepKind::DisablePackage, "disablePackage"),
             (StepKind::RemovePackage, "removePackage"),

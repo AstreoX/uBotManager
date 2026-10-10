@@ -1,5 +1,6 @@
 //! `ubot`: the command line interface of uBot Manager (SPEC §10).
 
+mod package;
 mod render;
 
 use std::collections::HashMap;
@@ -84,6 +85,32 @@ enum Command {
     },
     /// Installed Unreal Engine versions.
     Engines,
+    /// Build prebuilt binaries: install Name[@version]... from source in a host project under
+    /// <out>/_work, build it with a launcher engine and pack each package into
+    /// <out>/<Name>-<version>-UE<x.y>-Win64.zip (+ .sha256).
+    Package {
+        #[arg(required = true, value_name = "Name[@version]")]
+        packages: Vec<String>,
+        /// Folder for the archives.
+        #[arg(long, value_name = "dir")]
+        out: PathBuf,
+        /// Launcher engine id (5.5) or the root of a launcher engine; default: the newest
+        /// launcher engine.
+        #[arg(long, value_name = "id|root")]
+        engine: Option<String>,
+        /// Download URL of an archive; placeholders {repo} {ref} {file} {name} {version} {engine}.
+        #[arg(long, value_name = "template", default_value = ubot_core::prebuilt::DEFAULT_URL_TEMPLATE)]
+        url_template: String,
+        /// Write the binaries entries into this index file (and validate it).
+        #[arg(long, value_name = "index file")]
+        update_index: Option<PathBuf>,
+        /// Keep *.pdb, *.exp and *.lib files in the archives.
+        #[arg(long)]
+        with_symbols: bool,
+        /// Keep the host project in <out>/_work.
+        #[arg(long)]
+        keep_work: bool,
+    },
     /// Package index commands.
     Index {
         #[command(subcommand)]
@@ -254,6 +281,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
         return validate_index(file, cli.json);
     }
 
+    if let Command::Package {
+        packages,
+        out,
+        engine,
+        url_template,
+        update_index,
+        with_symbols,
+        keep_work,
+    } = cli.command
+    {
+        return package::run(
+            package::PackageArgs {
+                packages,
+                out,
+                engine,
+                url_template,
+                update_index,
+                with_symbols,
+                keep_work,
+            },
+            package::Globals {
+                index_override: index_override(&cli.index),
+                index: cli.index,
+                offline: cli.offline,
+                json: cli.json,
+            },
+        );
+    }
+
     let mutating = matches!(cli.command, Command::Apply { .. } | Command::Recipe { .. });
     let permanent_delete = std::env::var(PERMANENT_DELETE_ENV).is_ok_and(|value| value == "1");
     let options = ManagerOptions {
@@ -300,18 +356,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
         )
     {
-        let failed: Vec<String> = snapshot
-            .index
-            .iter()
-            .filter(|source| source.id.starts_with("cli-") && !source.ok && !source.from_cache)
-            .map(|source| {
-                format!(
-                    "--index {}: {}",
-                    source.location,
-                    source.error.as_deref().unwrap_or("could not be loaded")
-                )
-            })
-            .collect();
+        let failed = unloaded_index_sources(&snapshot);
         if !failed.is_empty() {
             bail!("{}", failed.join("\n"));
         }
@@ -502,10 +547,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Engines
+        | Command::Package { .. }
         | Command::Index {
             command: IndexCommand::Validate { .. },
         } => unreachable!("handled above"),
     }
+}
+
+/// The `--index` sources that could not be loaded (and are not served from a cache).
+fn unloaded_index_sources(snapshot: &Snapshot) -> Vec<String> {
+    snapshot
+        .index
+        .iter()
+        .filter(|source| source.id.starts_with("cli-") && !source.ok && !source.from_cache)
+        .map(|source| {
+            format!(
+                "--index {}: {}",
+                source.location,
+                source.error.as_deref().unwrap_or("could not be loaded")
+            )
+        })
+        .collect()
 }
 
 fn validate_index(file: &PathBuf, json_output: bool) -> Result<ExitCode> {
@@ -585,8 +647,30 @@ fn apply(
         return Ok(ExitCode::FAILURE);
     }
 
+    let task = run_task(manager, changes, options, title, json_output)?;
+    if json_output {
+        print_json(&task)?;
+    } else {
+        out(&render::task_result(&task));
+    }
+    Ok(match task.status {
+        StepStatus::Done => ExitCode::SUCCESS,
+        StepStatus::Canceled => ExitCode::from(130),
+        _ => ExitCode::FAILURE,
+    })
+}
+
+/// Runs the changes as a task, printing step transitions and output (unless `quiet`), with
+/// Ctrl+C canceling it; returns the finished task.
+fn run_task(
+    manager: &Manager,
+    changes: &[Change],
+    options: &ApplyOptions,
+    title: Option<ubot_core::model::Msg>,
+    quiet: bool,
+) -> Result<Task> {
     let sink = Arc::new(ConsoleSink {
-        quiet: json_output,
+        quiet,
         ..ConsoleSink::default()
     });
     interrupt::install();
@@ -618,21 +702,11 @@ fn apply(
     manager.wait_for_task(&task_id);
     finished.store(true, Ordering::SeqCst);
     let _ = watcher.join();
-    let task = manager
+    manager
         .list_tasks()
         .into_iter()
         .find(|task| task.id == task_id)
-        .ok_or_else(|| anyhow!("the task disappeared"))?;
-    if json_output {
-        print_json(&task)?;
-    } else {
-        out(&render::task_result(&task));
-    }
-    Ok(match task.status {
-        StepStatus::Done => ExitCode::SUCCESS,
-        StepStatus::Canceled => ExitCode::from(130),
-        _ => ExitCode::FAILURE,
-    })
+        .ok_or_else(|| anyhow!("the task disappeared"))
 }
 
 /// Prints step transitions and step output as they happen.

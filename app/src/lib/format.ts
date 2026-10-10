@@ -16,6 +16,17 @@ export function formatDuration(ms: number): string {
   return t("duration.hours", { h: hours, m: minutes % 60, mm: pad2(minutes % 60) });
 }
 
+const MEGABYTE = 1024 * 1024;
+
+function megabytes(bytes: number): string {
+  return (Math.max(0, bytes) / MEGABYTE).toFixed(1);
+}
+
+/** Byte progress of a download: "12.3 / 45.6 MB" (MB = 1024 × 1024 bytes, one decimal); "12.3 MB" while the size is unknown. */
+export function formatByteProgress(done: number, total: number): string {
+  return total > 0 ? `${megabytes(done)} / ${megabytes(total)} MB` : `${megabytes(done)} MB`;
+}
+
 export function formatClock(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
@@ -30,9 +41,19 @@ function changeVersion(change: Change, pkg: PackageInfo | undefined): string {
   return change.version ?? (change.kind === "install" ? pkg?.latestVersion ?? "" : "");
 }
 
-/** "Install UBotVehicles 0.1.0", "Update UBotSensor to 0.1.1", … */
+/** An update to the version that is already installed: the plan downloads a prebuilt install again (fix.reinstall). */
+export function isReinstall(change: Change, pkg: PackageInfo | undefined): boolean {
+  return change.kind === "update" && !!change.version && change.version === pkg?.installedVersion;
+}
+
+/** The word a pending change goes by in every label: its kind, except "reinstall" for a same-version update. */
+export function changeWord(change: Change, pkg: PackageInfo | undefined): Change["kind"] | "reinstall" {
+  return isReinstall(change, pkg) ? "reinstall" : change.kind;
+}
+
+/** "Install UBotVehicles 0.1.0", "Update UBotSensor to 0.1.1", … An update to the installed version re-downloads a prebuilt install. */
 export function changeText(change: Change, pkg: PackageInfo | undefined): string {
-  return t(`change.${change.kind}`, { package: pkg?.name ?? change.package, version: changeVersion(change, pkg) }).trim();
+  return t(`change.${changeWord(change, pkg)}`, { package: pkg?.name ?? change.package, version: changeVersion(change, pkg) }).trim();
 }
 
 /** At most one pending change per package: a new one replaces the old. */
@@ -112,4 +133,33 @@ export function isInstalled(pkg: PackageInfo): boolean {
 /** "https://github.com/AstreoX/uBotSensor" → "github.com/AstreoX/uBotSensor". */
 export function displayUrl(url: string): string {
   return url.replace(/^[a-z]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/\.git$/, "").replace(/\/$/, "");
+}
+
+/** "5.5.4" → "5.5"; prebuilt binaries are made per engine Major.Minor. */
+export function engineMajorMinor(version: string | null | undefined): string | null {
+  const match = /^(\d+)\.(\d+)/.exec(version ?? "");
+  return match ? `${match[1]}.${match[2]}` : null;
+}
+
+/** The only platform prebuilt binaries are made for. */
+export const PREBUILT_PLATFORM = "Win64";
+
+/**
+ * "Installed from" of the details pane: "git · v0.1.0", "Prebuilt · UE 5.5 · Win64" or "Local folder"; null when the
+ * package is not installed. The engine of a prebuilt install is the one its install marker records (`pkg.prebuilt`),
+ * which differs from the project's when the package was installed for another engine.
+ */
+export function installedFromText(pkg: PackageInfo): string | null {
+  switch (pkg.installKind) {
+    case null:
+      return null;
+    case "git":
+      return pkg.git?.ref ? t("details.fromGit", { ref: pkg.git.ref }) : "git";
+    case "prebuilt":
+      return pkg.prebuilt?.engine
+        ? t("details.fromPrebuilt", { engine: pkg.prebuilt.engine, platform: pkg.prebuilt.platform || PREBUILT_PLATFORM })
+        : `${t("details.prebuiltNote")} · ${PREBUILT_PLATFORM}`;
+    case "other":
+      return t("details.fromOther");
+  }
 }

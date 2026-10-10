@@ -74,7 +74,7 @@ const INDEX: &str = r#"{
 
 fn descriptor(requires: &str) -> String {
     format!(
-        r#"{{ "FileVersion": 3, "VersionName": "0.1.0", "UBot": {{ "Layer": "Foundation", "Requires": [ {requires} ] }} }}"#
+        r#"{{ "FileVersion": 3, "VersionName": "0.1.0", "Modules": [ {{ "Name": "M", "Type": "Runtime" }} ], "UBot": {{ "Layer": "Foundation", "Requires": [ {requires} ] }} }}"#
     )
 }
 

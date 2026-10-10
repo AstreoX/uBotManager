@@ -34,6 +34,8 @@ pub struct Descriptor {
     pub description: Option<String>,
     pub docs_url: Option<String>,
     pub enabled_by_default: Option<bool>,
+    /// The descriptor lists `Modules`: the plugin has code that must be built.
+    pub has_modules: bool,
     /// `Some` when the descriptor has a `"UBot"` object: the plugin is a uBot package.
     pub ubot: Option<UBotBlock>,
     /// Problems found while reading the descriptor (only collected for uBot packages).
@@ -72,6 +74,10 @@ pub fn parse_object(json: &Map<String, Value>) -> Descriptor {
             }
             None => None,
         },
+        has_modules: json
+            .get("Modules")
+            .and_then(Value::as_array)
+            .is_some_and(|modules| !modules.is_empty()),
         ubot: None,
         issues: Vec::new(),
     };
@@ -235,6 +241,13 @@ mod tests {
         )
         .unwrap();
         assert!(descriptor.issues.is_empty(), "{:?}", descriptor.issues);
+        assert!(!descriptor.has_modules);
+        assert!(
+            parse(r#"{ "Modules": [ { "Name": "UBotSensor", "Type": "Runtime" } ] }"#)
+                .unwrap()
+                .has_modules
+        );
+        assert!(!parse(r#"{ "Modules": [] }"#).unwrap().has_modules);
         assert_eq!(descriptor.version_name.as_deref(), Some("0.1.0"));
         assert_eq!(descriptor.friendly_name.as_deref(), Some("uBot Sensor"));
         assert_eq!(

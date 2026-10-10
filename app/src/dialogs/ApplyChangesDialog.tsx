@@ -61,7 +61,7 @@ export function ApplyChangesDialog(props: { plan: Plan; options: ApplyOptions })
   const deps = useMemo<DepRow[]>(() => {
     const rows: DepRow[] = [];
     const handled = (name: string) => plan.steps.some((s) =>
-      (s.kind === "clone" || s.kind === "checkout" || s.kind === "enablePackage" || s.kind === "enableEnginePlugin")
+      (s.kind === "clone" || s.kind === "checkout" || s.kind === "download" || s.kind === "enablePackage" || s.kind === "enableEnginePlugin")
       && sameName(s.title.params["package"] ?? s.title.params["plugin"] ?? "", name));
     for (const change of plan.changes) {
       if (change.kind !== "install" && change.kind !== "update" && change.kind !== "enable") continue;

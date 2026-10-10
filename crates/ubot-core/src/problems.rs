@@ -2,10 +2,11 @@
 
 use crate::graph;
 use crate::model::{
-    Change, ChangeKind, Fix, FixAction, Msg, PackageInfo, Problem, ProblemFact, ProblemScope,
-    SessionKind, SettingsSection, Severity,
+    Change, ChangeKind, Fix, FixAction, InstallKind, Msg, PackageInfo, Problem, ProblemFact,
+    ProblemScope, SessionKind, SettingsSection, Severity,
 };
 use crate::msg::{is_known_code, msg, msg0, verbatim};
+use crate::project::DiscoveredPlugin;
 use crate::url::redact_credentials;
 use crate::version::{Constraint, SemVer};
 use crate::workspace::{PluginPresence, Workspace};
@@ -164,6 +165,7 @@ pub fn compute(workspace: &Workspace) -> Vec<ComputedProblem> {
         }
         let mut found = Vec::new();
         requirement_problems(workspace, &name, plugin.version(), &mut found);
+        found.extend(prebuilt_problem(workspace, &name, plugin));
         problems.extend(
             found
                 .into_iter()
@@ -404,6 +406,62 @@ fn requirement_problems(
     }
 }
 
+/// A package installed from prebuilt binaries for another engine version than the project's: UE
+/// will not load its modules. Reinstalling downloads the binaries for this engine, so that fix is
+/// offered only when the planner could do it (`usePrebuilt` on, a launcher engine, and the index
+/// has binaries of the installed version for this engine); otherwise disabling is the only fix.
+fn prebuilt_problem(
+    workspace: &Workspace,
+    name: &str,
+    plugin: &DiscoveredPlugin,
+) -> Option<Problem> {
+    let marker = plugin.install_marker.as_ref()?;
+    if workspace.install_kind(name) != Some(InstallKind::Prebuilt) {
+        return None;
+    }
+    let engine = workspace.project.as_ref()?.engine.as_ref()?;
+    let project_engine = workspace.engine_major_minor()?;
+    if marker.engine == project_engine {
+        return None;
+    }
+    let mut list = Vec::new();
+    if let Some(version) = plugin.version() {
+        let can_reinstall = workspace
+            .index
+            .package(name)
+            .and_then(|package| package.find_version(version))
+            .is_some_and(|entry| workspace.prebuilt_binary(entry).is_some());
+        if can_reinstall {
+            list.push((
+                msg("fix.reinstall", &[("package", name)]),
+                changes(ChangeKind::Update, name, Some(version)),
+            ));
+        }
+    }
+    list.push((
+        msg("fix.disable", &[("package", name)]),
+        changes(ChangeKind::Disable, name, None),
+    ));
+    Some(problem(
+        format!("prebuilt:{name}"),
+        name.to_string(),
+        Severity::Warning,
+        msg(
+            "problem.prebuiltEngineMismatch",
+            &[
+                ("package", name),
+                ("built", &marker.engine),
+                ("engine", &project_engine),
+            ],
+        ),
+        vec![
+            fact("fact.package", with_version(name, plugin.version())),
+            fact("fact.engine", engine.version.clone()),
+        ],
+        fixes(list),
+    ))
+}
+
 /// One problem per dependency cycle among the enabled packages.
 fn cycle_problems(workspace: &Workspace, problems: &mut Vec<ComputedProblem>) {
     let mut names: Vec<String> = workspace
@@ -599,7 +657,7 @@ pub fn attach_problem_ids(packages: &mut [PackageInfo], problems: &[ComputedProb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FixAction;
+    use crate::model::{EngineKind, FixAction};
     use crate::sources::SourceFailure;
     use crate::status::{SessionFile, SessionProblem};
     use crate::workspace::tests::sample_workspace;
@@ -903,6 +961,125 @@ mod tests {
             "Plugins/uBot/loopB/LoopB.uplugin"
         );
         assert!(descriptor.message.params["detail"].contains("'bad'"));
+    }
+
+    #[test]
+    fn prebuilt_binaries_for_another_engine_are_reported() {
+        use crate::workspace::tests::{add_binaries, mark_prebuilt, prebuilt_workspace};
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), true);
+        mark_prebuilt(&mut workspace, "UBotSensor", "5.4");
+
+        // Without binaries of the installed version for this engine, a reinstall could not be
+        // planned (it would build from source only after an uninstall), so it is not offered.
+        let fix_labels = |workspace: &Workspace| -> Vec<(String, bool)> {
+            let computed = compute(workspace);
+            let problems = plain(&computed);
+            find(&problems, "prebuilt:UBotSensor")
+                .fixes
+                .iter()
+                .map(|fix| (fix.label.code.clone(), fix.primary))
+                .collect()
+        };
+        assert_eq!(fix_labels(&workspace), [("fix.disable".to_string(), true)]);
+        add_binaries(&mut workspace, "UBotSensor", "0.1.0");
+        assert_eq!(
+            fix_labels(&workspace),
+            [
+                ("fix.reinstall".to_string(), true),
+                ("fix.disable".to_string(), false)
+            ]
+        );
+        let mut off = workspace.clone();
+        off.settings.install.use_prebuilt = false;
+        assert_eq!(fix_labels(&off), [("fix.disable".to_string(), true)]);
+        let mut source_engine = workspace.clone();
+        source_engine
+            .project
+            .as_mut()
+            .unwrap()
+            .engine
+            .as_mut()
+            .unwrap()
+            .kind = EngineKind::Source;
+        assert_eq!(
+            fix_labels(&source_engine),
+            [("fix.disable".to_string(), true)]
+        );
+
+        let computed = compute(&workspace);
+        let problems = plain(&computed);
+        let mismatch = find(&problems, "prebuilt:UBotSensor");
+        assert_eq!(mismatch.severity, Severity::Warning);
+        assert_eq!(mismatch.group, "UBotSensor");
+        assert_eq!(mismatch.message.code, "problem.prebuiltEngineMismatch");
+        assert_eq!(
+            crate::msg::render_en(&mismatch.message),
+            "UBotSensor was installed prebuilt for UE 5.4, but this project uses UE 5.5."
+        );
+        let facts: Vec<(&str, &str)> = mismatch
+            .facts
+            .iter()
+            .map(|f| (f.label.code.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                ("fact.package", "UBotSensor 0.1.0"),
+                ("fact.engine", "5.5.4")
+            ]
+        );
+        assert_eq!(mismatch.fixes[0].label.code, "fix.reinstall");
+        assert!(mismatch.fixes[0].primary);
+        assert_eq!(
+            mismatch.fixes[0].action,
+            FixAction::Changes {
+                changes: vec![Change::new(
+                    ChangeKind::Update,
+                    "UBotSensor",
+                    Some("0.1.0".into())
+                )]
+            }
+        );
+        assert_eq!(
+            mismatch.fixes[1].action,
+            FixAction::Changes {
+                changes: vec![Change::new(ChangeKind::Disable, "UBotSensor", None)]
+            }
+        );
+        let mut packages = workspace.package_infos();
+        attach_problem_ids(&mut packages, &computed);
+        let sensor = packages.iter().find(|p| p.name == "UBotSensor").unwrap();
+        assert!(sensor
+            .problem_ids
+            .contains(&"prebuilt:UBotSensor".to_string()));
+
+        // Built for this engine, disabled, or no engine found: nothing to report.
+        mark_prebuilt(&mut workspace, "UBotSensor", "5.5");
+        assert!(!plain(&compute(&workspace))
+            .iter()
+            .any(|p| p.id.starts_with("prebuilt:")));
+        mark_prebuilt(&mut workspace, "UBotSensor", "5.4");
+        let mut no_engine = workspace.clone();
+        no_engine.project.as_mut().unwrap().engine = None;
+        assert!(!plain(&compute(&no_engine))
+            .iter()
+            .any(|p| p.id.starts_with("prebuilt:")));
+        let root = dir.path().join("MyRobotSim");
+        crate::uproject::edit(&root.join("MyRobotSim.uproject"), |project| {
+            project.set_enabled("UBotSensor", false)
+        })
+        .unwrap();
+        workspace
+            .project
+            .as_mut()
+            .unwrap()
+            .project
+            .reload()
+            .unwrap();
+        assert!(!plain(&compute(&workspace))
+            .iter()
+            .any(|p| p.id.starts_with("prebuilt:")));
     }
 
     #[test]

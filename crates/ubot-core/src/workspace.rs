@@ -7,12 +7,14 @@ use std::sync::Arc;
 use crate::descriptor::Dependency;
 use crate::engine::EnginePlugins;
 use crate::git::GitInfo;
-use crate::index::{IndexPackage, MergedIndex};
+use crate::index::{IndexPackage, IndexVersion, MergedIndex, PrebuiltBinary};
 use crate::model::{
-    EditorState, EngineInfo, IndexSourceStatus, Layer, LocalizedText, PackageInfo, PackageState,
-    PluginInfo, ProjectInfo, Recipe, Requirement, RequirementKind, RequirementStatus, Settings,
+    EditorState, EngineInfo, EngineKind, IndexSourceStatus, InstallKind, Layer, LocalizedText,
+    PackageInfo, PackageState, PluginInfo, PrebuiltInfo, ProjectInfo, Recipe, Requirement,
+    RequirementKind, RequirementStatus, Settings,
 };
 use crate::paths;
+use crate::prebuilt::{engine_major_minor, PLATFORM};
 use crate::project::{DiscoveredPlugin, Project};
 use crate::sources::SourceFailure;
 use crate::status::SessionFile;
@@ -185,6 +187,48 @@ impl Workspace {
             .get(&name.trim().to_ascii_lowercase())
     }
 
+    /// How an installed plugin got into the project: a git checkout, prebuilt binaries the
+    /// manager installed (a valid marker), or neither. `None` when it is not installed.
+    pub fn install_kind(&self, name: &str) -> Option<InstallKind> {
+        let plugin = self.plugin(name)?;
+        Some(if self.git(name).is_some_and(|git| git.is_checkout) {
+            InstallKind::Git
+        } else if plugin.install_marker.is_some() {
+            InstallKind::Prebuilt
+        } else {
+            InstallKind::Other
+        })
+    }
+
+    /// `Major.Minor` of the project's engine.
+    pub fn engine_major_minor(&self) -> Option<String> {
+        let engine = self.project.as_ref()?.engine.as_ref()?;
+        engine_major_minor(&engine.version)
+    }
+
+    /// The engine (`Major.Minor`) prebuilt binaries are chosen for: set when they are used
+    /// (`install.usePrebuilt`) and the project's engine is a launcher install, whose binaries
+    /// are the same on every machine.
+    pub fn prebuilt_engine(&self) -> Option<String> {
+        if !self.settings.install.use_prebuilt {
+            return None;
+        }
+        let engine = self.project.as_ref()?.engine.as_ref()?;
+        if engine.kind != EngineKind::Launcher {
+            return None;
+        }
+        engine_major_minor(&engine.version)
+    }
+
+    /// The prebuilt binaries an install of `version` would use now, with the engine
+    /// (`Major.Minor`) they are for.
+    pub fn prebuilt_binary(&self, version: &IndexVersion) -> Option<(PrebuiltBinary, String)> {
+        let engine = self.prebuilt_engine()?;
+        version
+            .prebuilt(&engine, PLATFORM)
+            .map(|binary| (binary, engine))
+    }
+
     pub fn project_info(&self) -> Option<ProjectInfo> {
         let context = self.project.as_ref()?;
         let project = &context.project;
@@ -348,6 +392,19 @@ impl Workspace {
             .or_else(|| descriptor.and_then(|d| d.docs_url.clone()));
 
         let requirements = self.requirements(name);
+        let install_kind = plugin.and_then(|_| self.install_kind(name));
+        // What the marker says the binaries are for: shown as is, because it can differ from the
+        // project's engine (a disabled package raises no problem about it).
+        let prebuilt = plugin
+            .filter(|_| install_kind == Some(InstallKind::Prebuilt))
+            .and_then(|plugin| plugin.install_marker.as_ref())
+            .map(|marker| PrebuiltInfo {
+                engine: marker.engine.clone(),
+                platform: marker.platform.clone(),
+            });
+        // An install, or the update of anything but a git checkout, would download it.
+        let prebuilt_available = install_kind != Some(InstallKind::Git)
+            && latest.is_some_and(|version| self.prebuilt_binary(version).is_some());
         let tags = match (block, index_package) {
             (Some(block), _) => block.tags.clone(),
             (None, Some(package)) => package.tags.clone(),
@@ -378,6 +435,9 @@ impl Workspace {
             location: plugin
                 .and_then(|plugin| self.project().map(|project| project.location(&plugin.dir))),
             git: plugin.map(|_| self.git(name).cloned().unwrap_or_default().to_state()),
+            install_kind,
+            prebuilt_available,
+            prebuilt,
             web_url: repository.as_deref().and_then(web_url),
             repository: repository.map(|repository| redact_credentials(&repository)),
             docs_url,
@@ -499,7 +559,7 @@ pub(crate) mod tests {
             .map(|name| format!("\"{name}\""))
             .collect();
         format!(
-            r#"{{ "FileVersion": 3, "VersionName": "{version}", "UBot": {{ "Layer": "{layer}", "Requires": [ {} ], "EnginePlugins": [ {} ] }} }}"#,
+            r#"{{ "FileVersion": 3, "VersionName": "{version}", "Modules": [ {{ "Name": "M", "Type": "Runtime" }} ], "UBot": {{ "Layer": "{layer}", "Requires": [ {} ], "EnginePlugins": [ {} ] }} }}"#,
             requires.join(", "),
             plugins.join(", ")
         )
@@ -607,6 +667,212 @@ pub(crate) mod tests {
         }
     }
 
+    pub const BINARY_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// [`sample_workspace`] with binaries for UE 5.5 in the index: UBotROS 0.1.0 and UBotCore
+    /// 0.2.0 have them, nothing else does.
+    pub fn prebuilt_workspace(dir: &Path, sensor_enabled: bool) -> Workspace {
+        let mut workspace = sample_workspace(dir, sensor_enabled);
+        let mut index = index::parse(TEST_INDEX).unwrap();
+        let binaries = |name: &str, version: &str| {
+            serde_json::json!({ "5.5": { "Win64": {
+                "url": format!("https://example.com/{name}-{version}-UE5.5-Win64.zip"),
+                "sha256": BINARY_SHA, "size": 1234 } } })
+        };
+        for package in &mut index.packages {
+            for version in &mut package.versions {
+                let wanted = matches!(
+                    (package.name.as_str(), version.version.as_str()),
+                    ("UBotROS", "0.1.0") | ("UBotCore", "0.2.0")
+                );
+                if wanted {
+                    version.binaries = Some(binaries(&package.name, &version.version));
+                }
+            }
+        }
+        workspace.index = crate::index::MergedIndex::merge(&[SourceIndex {
+            id: "ubot".into(),
+            index,
+        }]);
+        workspace
+    }
+
+    /// Gives `version` of `name` binaries for UE 5.5 in the workspace's index.
+    pub fn add_binaries(workspace: &mut Workspace, name: &str, version: &str) {
+        let mut file = workspace.index.to_file();
+        for package in file
+            .packages
+            .iter_mut()
+            .filter(|package| package.name.eq_ignore_ascii_case(name))
+        {
+            for entry in package
+                .versions
+                .iter_mut()
+                .filter(|entry| entry.version == version)
+            {
+                entry.binaries = Some(serde_json::json!({ "5.5": { "Win64": {
+                    "url": format!("https://example.com/{name}-{version}-UE5.5-Win64.zip"),
+                    "sha256": BINARY_SHA, "size": 1234 } } }));
+            }
+        }
+        workspace.index = crate::index::MergedIndex::merge(&[SourceIndex {
+            id: "ubot".into(),
+            index: file,
+        }]);
+    }
+
+    /// Writes a valid install marker into an installed plugin's folder and rescans.
+    pub fn mark_prebuilt(workspace: &mut Workspace, name: &str, engine: &str) {
+        let context = workspace.project.as_mut().unwrap();
+        let dir = context.project.find_plugin(name).unwrap().dir.clone();
+        let version = context
+            .project
+            .find_plugin(name)
+            .unwrap()
+            .version()
+            .unwrap()
+            .to_string();
+        crate::prebuilt::InstallMarker {
+            kind: crate::prebuilt::MARKER_KIND.into(),
+            package: name.into(),
+            version,
+            engine: engine.into(),
+            platform: PLATFORM.into(),
+            url: "https://example.com/x.zip".into(),
+            sha256: BINARY_SHA.into(),
+            installed_at: "2026-10-10T08:00:00Z".into(),
+        }
+        .write(&dir)
+        .unwrap();
+        context.git.remove(&name.to_ascii_lowercase());
+        context.project.reload().unwrap();
+    }
+
+    #[test]
+    fn install_kinds_and_prebuilt_availability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), true);
+        let info = |workspace: &Workspace, name: &str| workspace.package_info(name);
+
+        // Not installed, binaries for UE 5.5 and a launcher engine: available.
+        assert!(info(&workspace, "UBotROS").prebuilt_available);
+        assert_eq!(info(&workspace, "UBotROS").install_kind, None);
+        // The latest UBotCore (0.2.0) has binaries, but a git checkout updates with git.
+        assert_eq!(
+            info(&workspace, "UBotCore").install_kind,
+            Some(InstallKind::Git)
+        );
+        assert!(!info(&workspace, "UBotCore").prebuilt_available);
+        // No binaries for the planned UBotVehicles or for UBotSensor 0.1.0.
+        assert!(!info(&workspace, "UBotVehicles").prebuilt_available);
+        assert!(!info(&workspace, "UBotSensor").prebuilt_available);
+
+        // A marker makes a prebuilt install; its update would download again.
+        mark_prebuilt(&mut workspace, "UBotCore", "5.5");
+        assert_eq!(
+            info(&workspace, "UBotCore").install_kind,
+            Some(InstallKind::Prebuilt)
+        );
+        assert!(info(&workspace, "UBotCore").prebuilt_available);
+        assert_eq!(
+            info(&workspace, "UBotCore").prebuilt,
+            Some(PrebuiltInfo {
+                engine: "5.5".into(),
+                platform: "Win64".into()
+            })
+        );
+        assert_eq!(info(&workspace, "UBotROS").prebuilt, None, "not installed");
+        // A marker of another package (a copied folder) does not count.
+        let sensor_dir = workspace.plugin("UBotSensor").unwrap().dir.clone();
+        std::fs::copy(
+            workspace
+                .plugin("UBotCore")
+                .unwrap()
+                .dir
+                .join(crate::prebuilt::MARKER_FILE),
+            sensor_dir.join(crate::prebuilt::MARKER_FILE),
+        )
+        .unwrap();
+        workspace.project.as_mut().unwrap().git.remove("ubotsensor");
+        workspace
+            .project
+            .as_mut()
+            .unwrap()
+            .project
+            .reload()
+            .unwrap();
+        assert_eq!(
+            info(&workspace, "UBotSensor").install_kind,
+            Some(InstallKind::Other)
+        );
+        assert_eq!(info(&workspace, "UBotSensor").prebuilt, None);
+
+        // Not with usePrebuilt off, a source engine, another engine version or no engine.
+        let check = |change: &dyn Fn(&mut Workspace)| {
+            let mut copy = workspace.clone();
+            change(&mut copy);
+            info(&copy, "UBotROS").prebuilt_available
+        };
+        assert!(check(&|_| {}));
+        assert!(!check(&|w| w.settings.install.use_prebuilt = false));
+        assert!(!check(&|w| {
+            w.project.as_mut().unwrap().engine.as_mut().unwrap().kind = EngineKind::Source
+        }));
+        assert!(!check(&|w| {
+            w.project.as_mut().unwrap().engine.as_mut().unwrap().kind = EngineKind::Custom
+        }));
+        assert!(!check(&|w| {
+            w.project.as_mut().unwrap().engine.as_mut().unwrap().version = "5.6.0".into()
+        }));
+        assert!(!check(&|w| w.project.as_mut().unwrap().engine = None));
+        assert_eq!(workspace.prebuilt_engine().as_deref(), Some("5.5"));
+    }
+
+    /// The marker's engine is reported as written, whatever the project's engine is and whether or
+    /// not the package is enabled (a disabled package raises no engine mismatch problem).
+    #[test]
+    fn a_prebuilt_package_reports_the_engine_it_was_built_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), false);
+        assert_eq!(
+            workspace.package_info("UBotSensor").state,
+            PackageState::Disabled
+        );
+        mark_prebuilt(&mut workspace, "UBotSensor", "5.4");
+        let sensor = workspace.package_info("UBotSensor");
+        assert_eq!(sensor.install_kind, Some(InstallKind::Prebuilt));
+        assert_eq!(
+            sensor.prebuilt,
+            Some(PrebuiltInfo {
+                engine: "5.4".into(),
+                platform: "Win64".into()
+            })
+        );
+        assert_eq!(workspace.engine_major_minor().as_deref(), Some("5.5"));
+        // Without an engine the marker still says what it says.
+        workspace.project.as_mut().unwrap().engine = None;
+        assert_eq!(
+            workspace
+                .package_info("UBotSensor")
+                .prebuilt
+                .map(|p| p.engine),
+            Some("5.4".to_string())
+        );
+        // A git checkout has no prebuilt info, even with a marker next to its .git.
+        let mut workspace = prebuilt_workspace(dir.path(), false);
+        mark_prebuilt(&mut workspace, "UBotCore", "5.4");
+        workspace.project.as_mut().unwrap().git.insert(
+            "ubotcore".into(),
+            crate::git::GitInfo {
+                is_checkout: true,
+                ..Default::default()
+            },
+        );
+        let core = workspace.package_info("UBotCore");
+        assert_eq!(core.install_kind, Some(InstallKind::Git));
+        assert_eq!(core.prebuilt, None);
+    }
+
     #[test]
     fn builds_package_infos() {
         let dir = tempfile::tempdir().unwrap();
@@ -683,6 +949,10 @@ pub(crate) mod tests {
         let ros = &packages[4];
         assert_eq!(ros.state, PackageState::NotInstalled);
         assert_eq!(ros.requires[1].status, RequirementStatus::Disabled);
+        assert_eq!(ros.install_kind, None);
+        assert!(!ros.prebuilt_available, "the index has no binaries");
+        assert_eq!(core.install_kind, Some(InstallKind::Git));
+        assert_eq!(environment.install_kind, Some(InstallKind::Other));
 
         let plugins = workspace.plugin_infos();
         let legacy = plugins

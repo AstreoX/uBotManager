@@ -20,4 +20,6 @@ trash = "5"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }

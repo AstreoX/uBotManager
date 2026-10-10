@@ -63,7 +63,9 @@ describe("layoutGraph edges", () => {
   // height where UBotSensor's edge enters UBotROS, and the two wires read as one.
   it("keep clear of each other in the mock scenario, with a project and without", async () => {
     for (const noProject of [false, true]) {
-      const { backend } = createMockBackend({ lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject });
+      const { backend } = createMockBackend({
+        lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject, prebuilt: true
+      });
       const layout = layoutOf(await backend.getSnapshot());
       expect(layout.edges.length).toBeGreaterThan(0);
       expect(collisions(layout), `noProject=${noProject}`).toEqual([]);
@@ -93,7 +95,8 @@ describe("layoutGraph edges", () => {
         return {
           name: `P${i}`, friendlyName: `P${i}`, description: { en: "", "zh-CN": null }, layer: layers[layer]!,
           state: states[Math.floor(random() * 4)]!, installedVersion: null, latestVersion: null, versions: [], plannedVersion: null,
-          updateAvailable: false, location: null, git: null, repository: null, webUrl: null, docsUrl: null, indexSource: null,
+          updateAvailable: false, location: null, git: null, installKind: null, prebuiltAvailable: false, prebuilt: null, repository: null,
+          webUrl: null, docsUrl: null, indexSource: null,
           requires, provides: [], tags: [], problemIds: []
         };
       });

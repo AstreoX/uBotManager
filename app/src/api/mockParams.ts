@@ -12,6 +12,8 @@ export interface MockParams {
   section: SettingsSection | null;
   select: string | null;
   noProject: boolean;
+  /** `prebuilt=0`: start with "Use prebuilt binaries" off, so installs clone and build. */
+  prebuilt: boolean;
 }
 
 function pick<T extends string>(value: string | null, allowed: readonly T[]): T | null {
@@ -27,6 +29,7 @@ export function readMockParams(search: string): MockParams {
     dialog: pick(q.get("dialog"), ["recipes", "plan", "settings"] as const),
     section: pick(q.get("section"), ["appearance", "index", "install", "build", "ros"] as const),
     select: q.get("select"),
-    noProject: q.get("noproject") === "1"
+    noProject: q.get("noproject") === "1",
+    prebuilt: q.get("prebuilt") !== "0"
   };
 }

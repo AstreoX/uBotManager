@@ -6,10 +6,10 @@ import { CheckIcon, ClockIcon, CloseIcon, PendingIcon, RerunIcon, SkipIcon, Spin
 import { OptionsMenu } from "../components/Menu";
 import { t, tm, tn } from "../i18n";
 import { errorText } from "../lib/errors";
-import { formatClock, formatDuration } from "../lib/format";
+import { formatByteProgress, formatClock, formatDuration } from "../lib/format";
 import {
-  activeTask, appendLog, canRerun, defaultSelection, isFinished, isTaskOfProject, mergeLog, runningStep, stoppedStep,
-  type Selection
+  activeTask, appendLog, canRerun, defaultSelection, isDownloadStep, isFinished, isTaskOfProject, mergeLog, runningStep,
+  stoppedStep, type Selection
 } from "../lib/tasks";
 import { useApp } from "../state";
 
@@ -158,6 +158,13 @@ function statusText(status: StepStatus): string {
   return t(`stepStatus.${status}`);
 }
 
+/** " · 12.3 / 45.6 MB" for a download that is running. */
+function downloaded(step: TaskStep): string {
+  return step.status === "running" && step.progress && isDownloadStep(step)
+    ? ` · ${formatByteProgress(step.progress.done, step.progress.total)}`
+    : "";
+}
+
 function TaskLog({ task, stepId }: { task: Task; stepId: string | null }) {
   const [lines, setLines] = useState<string[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -206,7 +213,7 @@ function TaskLog({ task, stepId }: { task: Task; stepId: string | null }) {
     }
     const summary = [
       `${tn("tasks.steps", task.steps.length)} · ${statusText(task.status)} · ${t("tasks.startedAt", { time: formatClock(task.startedAt) })}`,
-      ...task.steps.map((s) => `${tm(s.title)} · ${statusText(s.status)}${s.durationMs !== null ? ` · ${formatDuration(s.durationMs)}` : ""}`)
+      ...task.steps.map((s) => `${tm(s.title)} · ${statusText(s.status)}${s.durationMs !== null ? ` · ${formatDuration(s.durationMs)}` : ""}${downloaded(s)}`)
     ];
     if (task.error) summary.push("", errorText(task.error));
     if (lines.length > 0) summary.push("", ...lines);

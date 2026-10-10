@@ -282,8 +282,8 @@ export function SettingsDialog(props: { section: SettingsSection }) {
               <span />
               <span><TestResult state={gitTest} /></span>
               <span />
-              <label className="check-label disabled">
-                <input type="checkbox" disabled checked={draft.install.usePrebuilt} readOnly />
+              <label className="check-label">
+                <input type="checkbox" checked={draft.install.usePrebuilt} onChange={() => set((s) => { s.install.usePrebuilt = !s.install.usePrebuilt; return s; })} />
                 {t("settings.usePrebuilt")}
               </label>
             </div>

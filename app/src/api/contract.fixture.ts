@@ -51,6 +51,9 @@ export const snapshots: Snapshot[] = [
           "ref": "v0.1.0",
           "dirty": false
         },
+        "installKind": "git",
+        "prebuiltAvailable": false,
+        "prebuilt": null,
         "repository": "https://github.com/AstreoX/uBotPackage0.git",
         "webUrl": "https://github.com/AstreoX/uBotPackage0",
         "docsUrl": null,
@@ -126,9 +129,15 @@ export const snapshots: Snapshot[] = [
         "updateAvailable": true,
         "location": "Plugins/uBot/uBotPackage1",
         "git": {
-          "isCheckout": true,
+          "isCheckout": false,
           "ref": null,
           "dirty": true
+        },
+        "installKind": "prebuilt",
+        "prebuiltAvailable": true,
+        "prebuilt": {
+          "engine": "5.5",
+          "platform": "Win64"
         },
         "repository": "https://github.com/AstreoX/uBotPackage1.git",
         "webUrl": "https://github.com/AstreoX/uBotPackage1",
@@ -162,6 +171,9 @@ export const snapshots: Snapshot[] = [
         "updateAvailable": false,
         "location": null,
         "git": null,
+        "installKind": null,
+        "prebuiltAvailable": true,
+        "prebuilt": null,
         "repository": "https://github.com/AstreoX/uBotPackage2.git",
         "webUrl": "https://github.com/AstreoX/uBotPackage2",
         "docsUrl": null,
@@ -191,6 +203,9 @@ export const snapshots: Snapshot[] = [
         "updateAvailable": false,
         "location": null,
         "git": null,
+        "installKind": null,
+        "prebuiltAvailable": false,
+        "prebuilt": null,
         "repository": "https://github.com/AstreoX/uBotPackage3.git",
         "webUrl": "https://github.com/AstreoX/uBotPackage3",
         "docsUrl": null,
@@ -223,9 +238,15 @@ export const snapshots: Snapshot[] = [
         "updateAvailable": true,
         "location": "Plugins/uBot/uBotPackage4",
         "git": {
-          "isCheckout": true,
+          "isCheckout": false,
           "ref": null,
           "dirty": false
+        },
+        "installKind": "prebuilt",
+        "prebuiltAvailable": false,
+        "prebuilt": {
+          "engine": "5.4",
+          "platform": "Win64"
         },
         "repository": "https://github.com/AstreoX/uBotPackage4.git",
         "webUrl": "https://github.com/AstreoX/uBotPackage4",
@@ -638,28 +659,28 @@ export const plans: Plan[] = [
         "id": "step-3",
         "n": 3,
         "group": "download",
-        "kind": "enablePackage",
+        "kind": "download",
         "title": {
-          "code": "step.clone",
+          "code": "step.download",
           "params": {
             "package": "UBotSensor",
             "version": "0.2.0"
           }
         },
         "detail": {
-          "code": "step.clone.detail",
+          "code": "step.download.detail",
           "params": {
             "dest": "Plugins/uBot/uBotSensor",
-            "repo": "https://github.com/AstreoX/uBotSensor.git"
+            "source": "github.com/…/UBotSensor-0.2.0-UE5.5-Win64.zip"
           }
         },
-        "needsEditorClosed": true
+        "needsEditorClosed": false
       },
       {
         "id": "step-4",
         "n": 4,
         "group": "project",
-        "kind": "disablePackage",
+        "kind": "enablePackage",
         "title": {
           "code": "step.clone",
           "params": {
@@ -680,7 +701,7 @@ export const plans: Plan[] = [
         "id": "step-5",
         "n": 5,
         "group": "project",
-        "kind": "enableEnginePlugin",
+        "kind": "disablePackage",
         "title": {
           "code": "step.clone",
           "params": {
@@ -701,7 +722,7 @@ export const plans: Plan[] = [
         "id": "step-6",
         "n": 6,
         "group": "build",
-        "kind": "removePackage",
+        "kind": "enableEnginePlugin",
         "title": {
           "code": "step.clone",
           "params": {
@@ -722,7 +743,7 @@ export const plans: Plan[] = [
         "id": "step-7",
         "n": 7,
         "group": "build",
-        "kind": "build",
+        "kind": "removePackage",
         "title": {
           "code": "step.clone",
           "params": {
@@ -742,8 +763,8 @@ export const plans: Plan[] = [
       {
         "id": "step-8",
         "n": 8,
-        "group": "after",
-        "kind": "runTests",
+        "group": "build",
+        "kind": "build",
         "title": {
           "code": "step.clone",
           "params": {
@@ -763,6 +784,27 @@ export const plans: Plan[] = [
       {
         "id": "step-9",
         "n": 9,
+        "group": "after",
+        "kind": "runTests",
+        "title": {
+          "code": "step.clone",
+          "params": {
+            "package": "UBotSensor",
+            "version": "0.2.0"
+          }
+        },
+        "detail": {
+          "code": "step.clone.detail",
+          "params": {
+            "dest": "Plugins/uBot/uBotSensor",
+            "repo": "https://github.com/AstreoX/uBotSensor.git"
+          }
+        },
+        "needsEditorClosed": true
+      },
+      {
+        "id": "step-10",
+        "n": 10,
         "group": "after",
         "kind": "openEditor",
         "title": {
@@ -801,6 +843,18 @@ export const plans: Plan[] = [
           "branch": "main",
           "package": "UBotCore"
         }
+      },
+      {
+        "code": "plan.prebuiltUnavailable",
+        "params": {
+          "engine": "5.5",
+          "package": "UBotROS",
+          "version": "0.1.0"
+        }
+      },
+      {
+        "code": "plan.noCompiler",
+        "params": {}
       }
     ]
   },
@@ -928,6 +982,24 @@ export const tasks: Task[] = [
         "durationMs": 1500,
         "progress": null,
         "logLines": 60
+      },
+      {
+        "id": "step-download",
+        "title": {
+          "code": "step.download",
+          "params": {
+            "package": "UBotSensor",
+            "version": "0.2.0"
+          }
+        },
+        "status": "running",
+        "startedAt": "2026-10-10T08:00:00Z",
+        "durationMs": null,
+        "progress": {
+          "done": 12300000,
+          "total": 45600000
+        },
+        "logLines": 1
       }
     ],
     "error": null,
@@ -1343,7 +1415,7 @@ export const settings: Settings[] = [
     "install": {
       "directory": "Plugins/uBot",
       "git": "git",
-      "usePrebuilt": false
+      "usePrebuilt": true
     },
     "build": {
       "engineId": null,
@@ -1433,7 +1505,7 @@ export const settings: Settings[] = [
     "install": {
       "directory": "Plugins/uBot",
       "git": "git",
-      "usePrebuilt": false
+      "usePrebuilt": true
     },
     "build": {
       "engineId": null,

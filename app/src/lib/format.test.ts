@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { PackageInfo, Problem, Requirement, Snapshot } from "../api/types";
-import { setLanguage } from "../i18n";
+import { hasKey, setLanguage, t } from "../i18n";
 import {
-  changeText, defaultVersion, detailsKey, displayUrl, formatDuration, isEditorRunning, problemCounts, problemGroupTitle,
-  problemsFor, sameProjectPath, upsertChange, versionChoices
+  changeText, changeWord, defaultVersion, detailsKey, displayUrl, engineMajorMinor, formatByteProgress, formatDuration, installedFromText,
+  isEditorRunning, isReinstall, problemCounts, problemGroupTitle, problemsFor, sameProjectPath, upsertChange, versionChoices
 } from "./format";
 import { layoutGraph } from "./graphLayout";
 import { compareVersionStrings, satisfies } from "./semver";
@@ -28,6 +28,23 @@ describe("formatDuration", () => {
   });
 });
 
+describe("formatByteProgress", () => {
+  const MB = 1024 * 1024;
+
+  it("shows megabytes of 1024 x 1024 bytes with one decimal", () => {
+    expect(formatByteProgress(Math.round(12.3 * MB), Math.round(45.6 * MB))).toBe("12.3 / 45.6 MB");
+    expect(formatByteProgress(0, 47_815_066)).toBe("0.0 / 45.6 MB");
+    expect(formatByteProgress(47_815_066, 47_815_066)).toBe("45.6 / 45.6 MB");
+    expect(formatByteProgress(1_000_000, 2_000_000)).toBe("1.0 / 1.9 MB");
+    expect(formatByteProgress(52_428, 2 * 1024 * MB)).toBe("0.0 / 2048.0 MB");
+  });
+
+  it("shows the bytes received while the size is unknown", () => {
+    expect(formatByteProgress(Math.round(3.25 * MB) + 1, 0)).toBe("3.3 MB");
+    expect(formatByteProgress(-1, 0)).toBe("0.0 MB");
+  });
+});
+
 describe("changes", () => {
   const pkg = { name: "UBotVehicles", latestVersion: "0.1.0" } as PackageInfo;
 
@@ -38,6 +55,57 @@ describe("changes", () => {
     setLanguage("zh-CN");
     expect(changeText({ kind: "install", package: "UBotVehicles", version: "0.1.0" }, pkg)).toBe("安装 UBotVehicles 0.1.0");
     expect(changeText({ kind: "update", package: "UBotSensor", version: "0.1.1" }, undefined)).toBe("将 UBotSensor 更新到 0.1.1");
+  });
+
+  it("calls an update to the installed version a reinstall", () => {
+    const combat = { name: "UBotCombat", installedVersion: "0.1.0", latestVersion: "0.1.0" } as PackageInfo;
+    setLanguage("en");
+    expect(changeText({ kind: "update", package: "UBotCombat", version: "0.1.0" }, combat)).toBe("Reinstall UBotCombat 0.1.0");
+    setLanguage("zh-CN");
+    expect(changeText({ kind: "update", package: "UBotCombat", version: "0.1.0" }, combat)).toBe("重新安装 UBotCombat 0.1.0");
+    expect(changeText({ kind: "update", package: "UBotCombat", version: "0.2.0" }, combat)).toBe("将 UBotCombat 更新到 0.2.0");
+  });
+
+  it("recognises a reinstall only as an update to the installed version", () => {
+    const combat = { name: "UBotCombat", installedVersion: "0.1.0", latestVersion: "0.2.0" } as PackageInfo;
+    const notInstalled = { name: "UBotVehicles", installedVersion: null, latestVersion: "0.1.0" } as PackageInfo;
+    expect(isReinstall({ kind: "update", package: "UBotCombat", version: "0.1.0" }, combat)).toBe(true);
+    expect(isReinstall({ kind: "update", package: "UBotCombat", version: "0.2.0" }, combat)).toBe(false);
+    expect(isReinstall({ kind: "update", package: "UBotCombat", version: null }, combat)).toBe(false);
+    expect(isReinstall({ kind: "update", package: "UBotCombat", version: "0.1.0" }, undefined)).toBe(false);
+    expect(isReinstall({ kind: "update", package: "UBotVehicles", version: "0.1.0" }, notInstalled)).toBe(false);
+    expect(isReinstall({ kind: "install", package: "UBotCombat", version: "0.1.0" }, combat)).toBe(false);
+    expect(isReinstall({ kind: "enable", package: "UBotCombat", version: "0.1.0" }, combat)).toBe(false);
+  });
+
+  it("names a pending change the same in the list row, the cancel button and the status bar", () => {
+    const combat = { name: "UBotCombat", installedVersion: "0.1.0", latestVersion: "0.2.0" } as PackageInfo;
+    const reinstall = { kind: "update", package: "UBotCombat", version: "0.1.0" } as const;
+    const update = { kind: "update", package: "UBotCombat", version: "0.2.0" } as const;
+    expect(changeWord(reinstall, combat)).toBe("reinstall");
+    expect(changeWord(update, combat)).toBe("update");
+    expect(changeWord({ kind: "uninstall", package: "UBotCombat", version: null }, combat)).toBe("uninstall");
+    setLanguage("en");
+    expect(t(`packages.pending.${changeWord(reinstall, combat)}`)).toBe("reinstall pending");
+    expect(t(`action.cancel.${changeWord(reinstall, combat)}`)).toBe("Cancel reinstall");
+    expect(t(`packages.pending.${changeWord(update, combat)}`)).toBe("update pending");
+    expect(t(`action.cancel.${changeWord(update, combat)}`)).toBe("Cancel update");
+    setLanguage("zh-CN");
+    expect(t(`packages.pending.${changeWord(reinstall, combat)}`)).toBe("待重新安装");
+    expect(t(`action.cancel.${changeWord(reinstall, combat)}`)).toBe("取消重新安装");
+    expect(t(`packages.pending.${changeWord(update, combat)}`)).toBe("待更新");
+    expect(t(`action.cancel.${changeWord(update, combat)}`)).toBe("取消更新");
+  });
+
+  it("has list-row and cancel-button text for every word a pending change can go by, in both languages", () => {
+    const words = ["install", "update", "reinstall", "enable", "disable", "uninstall"];
+    for (const lang of ["en", "zh-CN"] as const) {
+      setLanguage(lang);
+      for (const word of words) {
+        expect(hasKey(`packages.pending.${word}`), `${lang} packages.pending.${word}`).toBe(true);
+        expect(hasKey(`action.cancel.${word}`), `${lang} action.cancel.${word}`).toBe(true);
+      }
+    }
   });
 
   it("keeps one change per package", () => {
@@ -54,7 +122,7 @@ describe("changes", () => {
 const emptyPackage = (patch: Partial<PackageInfo>): PackageInfo => ({
   name: "UBotSensor", friendlyName: "uBot Sensor", description: { en: "", "zh-CN": null }, layer: "Capability", state: "enabled",
   installedVersion: null, latestVersion: null, versions: [], plannedVersion: null, updateAvailable: false, location: null, git: null,
-  repository: null, webUrl: null, docsUrl: null, indexSource: null, requires: [], provides: [], tags: [], problemIds: [], ...patch
+  installKind: null, prebuiltAvailable: false, prebuilt: null, repository: null, webUrl: null, docsUrl: null, indexSource: null, requires: [], provides: [], tags: [], problemIds: [], ...patch
 });
 
 const problem = (id: string, severity: Problem["severity"], group = "UBotSensor"): Problem => ({
@@ -85,6 +153,43 @@ describe("problems", () => {
     const core = emptyPackage({ name: "UBotCore", problemIds: [] });
     expect(problemsFor(sensor, list).map((p) => p.id)).toEqual(["requires:UBotSensor:UBotCore"]);
     expect(problemsFor(core, list)).toEqual([]);
+  });
+});
+
+describe("installed from", () => {
+  const built = (engine: string) => ({ engine, platform: "Win64" });
+
+  it("names the source of an installed package in both languages", () => {
+    const git = emptyPackage({ installKind: "git", git: { isCheckout: true, ref: "v0.1.0", dirty: false } });
+    const prebuilt = emptyPackage({
+      name: "UBotCombat", installKind: "prebuilt", prebuilt: built("5.5"), git: { isCheckout: false, ref: null, dirty: false }
+    });
+    const other = emptyPackage({ installKind: "other", git: { isCheckout: false, ref: null, dirty: false } });
+    setLanguage("en");
+    expect(installedFromText(git)).toBe("git · v0.1.0");
+    expect(installedFromText(prebuilt)).toBe("Prebuilt · UE 5.5 · Win64");
+    expect(installedFromText(other)).toBe("Local folder");
+    expect(installedFromText(emptyPackage({ state: "notInstalled" }))).toBeNull();
+    setLanguage("zh-CN");
+    expect(installedFromText(git)).toBe("git · v0.1.0");
+    expect(installedFromText(prebuilt)).toBe("预编译 · UE 5.5 · Win64");
+    expect(installedFromText(other)).toBe("本地文件夹");
+  });
+
+  it("takes the engine of a prebuilt install from its install marker, whatever the package state", () => {
+    setLanguage("en");
+    const prebuilt = emptyPackage({ name: "UBotCombat", installKind: "prebuilt", state: "disabled", prebuilt: built("5.4") });
+    expect(installedFromText(prebuilt)).toBe("Prebuilt · UE 5.4 · Win64");
+    expect(installedFromText({ ...prebuilt, prebuilt: null })).toBe("Prebuilt · Win64");
+    // A checkout whose git state could not be read has no ref.
+    expect(installedFromText(emptyPackage({ installKind: "git", git: { isCheckout: true, ref: null, dirty: false } }))).toBe("git");
+  });
+
+  it("reduces engine versions to Major.Minor", () => {
+    expect(engineMajorMinor("5.5.4")).toBe("5.5");
+    expect(engineMajorMinor("5.10")).toBe("5.10");
+    expect(engineMajorMinor("")).toBeNull();
+    expect(engineMajorMinor(null)).toBeNull();
   });
 });
 
@@ -157,7 +262,8 @@ describe("layoutGraph", () => {
     ({ name, constraint: "^0.1.0", optional: false, kind: "package", status, installedVersion: null });
   const pkg = (name: string, layer: PackageInfo["layer"], state: PackageInfo["state"], requires: Requirement[]): PackageInfo => ({
     name, friendlyName: name, description: { en: "", "zh-CN": null }, layer, state, installedVersion: null, latestVersion: null,
-    versions: [], plannedVersion: null, updateAvailable: false, location: null, git: null, repository: null, webUrl: null,
+    versions: [], plannedVersion: null, updateAvailable: false, location: null, git: null, installKind: null, prebuiltAvailable: false, prebuilt: null,
+    repository: null, webUrl: null,
     docsUrl: null, indexSource: null, requires, provides: [], tags: [], problemIds: []
   });
   const packages = [

@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { platform } from "../api";
-import type { IndexSourceStatus, Task } from "../api/types";
-import { hasKey, t, tm, tn } from "../i18n";
+import type { IndexSourceStatus } from "../api/types";
+import { t, tm, tn } from "../i18n";
 import { changeText, problemCounts, sameName } from "../lib/format";
-import { activeTask, canSwitchProject } from "../lib/tasks";
+import { activeTask, canSwitchProject, taskProgress } from "../lib/tasks";
 import { packageProblems, useApp } from "../state";
 import {
   CloseGlyph, CloseIcon, ErrorIcon, GearIcon, GraphIcon, MaximizeGlyph, MinimizeGlyph, PackageIcon, RecipeIcon,
@@ -100,18 +100,6 @@ export function ToolStrip() {
   );
 }
 
-function progressOf(task: Task): { text: string; done: number; total: number } {
-  const index = task.steps.findIndex((s) => s.status === "running" || s.status === "waiting");
-  const step = index >= 0 ? task.steps[index] : undefined;
-  if (!step) return { text: tm(task.title), done: 0, total: task.steps.length };
-  let text: string;
-  if (step.status === "waiting") text = t("progress.waiting");
-  else if (hasKey(`progress.${step.title.code}`)) text = t(`progress.${step.title.code}`, step.title.params);
-  else text = tm(step.title);
-  if (step.progress) return { text, done: step.progress.done, total: step.progress.total };
-  return { text, done: index + 1, total: task.steps.length };
-}
-
 export function StatusBar() {
   const { state, actions } = useApp();
   const { snapshot, view, pending, tasks } = state;
@@ -119,17 +107,23 @@ export function StatusBar() {
   const running = activeTask(tasks);
 
   if (view === "tasks" && running) {
-    const p = progressOf(running);
+    const p = taskProgress(running);
     const ratio = p.total > 0 ? Math.min(1, p.done / p.total) : 0;
     return (
       <footer className="statusbar">
         <span>{crumb}</span>
         <span className="spacer" />
         <span className="sb-progress-text">{p.text}</span>
-        <span className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={p.total} aria-valuenow={p.done}>
-          <span className="fill" style={{ width: `${ratio * 100}%` }} />
-        </span>
-        <span className="mono" style={{ fontSize: 12 }}>{p.done}/{p.total}</span>
+        {p.indeterminate ? (
+          <span className="progress indeterminate" role="progressbar" aria-valuetext={p.count}>
+            <span className="fill" />
+          </span>
+        ) : (
+          <span className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={p.total} aria-valuenow={p.done} aria-valuetext={p.count}>
+            <span className="fill" style={{ width: `${ratio * 100}%` }} />
+          </span>
+        )}
+        <span className="mono" style={{ fontSize: 12 }}>{p.count}</span>
         <button type="button" className="sb-cancel" aria-label={t("status.cancelTask")} title={t("status.cancelTask")} onClick={() => actions.cancelTask(running.id)}>
           <CloseIcon size={10} strokeWidth={1.8} />
         </button>

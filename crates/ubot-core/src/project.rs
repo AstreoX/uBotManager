@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::descriptor::{self, Descriptor};
 use crate::engine::EnginePlugins;
 use crate::paths;
+use crate::prebuilt::InstallMarker;
 use crate::uproject::UProject;
 
 /// Directories never searched for plugins.
@@ -55,10 +56,14 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         return;
     }
     for path in entries {
+        // `.ubot-*` folders are the manager's own: a download being extracted, or the previous
+        // version of a package during its replacement.
         let skipped = path
             .file_name()
             .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .is_some_and(|name| SKIPPED_DIRS.contains(&name.as_str()));
+            .is_some_and(|name| {
+                SKIPPED_DIRS.contains(&name.as_str()) || name.starts_with(".ubot-")
+            });
         if !skipped && path.is_dir() {
             walk(&path, depth + 1, found);
         }
@@ -76,6 +81,9 @@ pub struct DiscoveredPlugin {
     pub descriptor: Result<Descriptor, String>,
     /// The raw text mentions a `"UBot"` key; used when it does not parse.
     pub mentions_ubot: bool,
+    /// A valid `.ubot-install.json` of this plugin: the manager installed it from prebuilt
+    /// binaries.
+    pub install_marker: Option<InstallMarker>,
 }
 
 impl DiscoveredPlugin {
@@ -88,16 +96,25 @@ impl DiscoveredPlugin {
             Ok((text, _)) => (descriptor::parse(&text), text.contains("\"UBot\"")),
             Err(error) => (Err(error.to_string()), false),
         };
+        let dir = descriptor_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         DiscoveredPlugin {
+            install_marker: InstallMarker::read(&dir, &name),
             name,
             descriptor_path: descriptor_path.to_path_buf(),
-            dir: descriptor_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+            dir,
             descriptor,
             mentions_ubot,
         }
+    }
+
+    /// The plugin has code modules (an unreadable descriptor is assumed to have some).
+    pub fn has_modules(&self) -> bool {
+        self.descriptor
+            .as_ref()
+            .map_or(true, |descriptor| descriptor.has_modules)
     }
 
     /// The descriptor has a `"UBot"` object (or is unreadable but mentions one).
@@ -379,6 +396,10 @@ mod tests {
             "{}",
         );
         write(&project_dir.join("Plugins/x/.git/G/G.uplugin"), "{}");
+        write(
+            &project_dir.join("Plugins/uBot/.ubot-extract-UBotROS/UBotROS/UBotROS.uplugin"),
+            r#"{ "VersionName": "9.0.0", "UBot": { "Layer": "Adapter" } }"#,
+        );
         write(
             &root.path().join("Shared/uBotROS/UBotROS.uplugin"),
             r#"{ "VersionName": "0.1.0", "UBot": { "Layer": "Adapter" } }"#,

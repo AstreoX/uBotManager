@@ -130,6 +130,82 @@ fn ubotcore_index_matches_its_schema() {
         "{errors:#?}"
     );
 
+    // Prebuilt binaries: the shapes `ubot index validate` accepts, and what it refuses.
+    let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut binaries = real.clone();
+    binaries["packages"][0]["versions"][0]["binaries"] = json!({
+        "5.5": { "Win64": { "url": "https://github.com/AstreoX/uBotCore/releases/download/v0.1.0/UBotCore-0.1.0-UE5.5-Win64.zip", "sha256": sha, "size": 1234 } },
+        "5.6": { "Win64": { "url": "file:///D:/mirror/UBotCore.zip", "sha256": sha },
+                 "Linux": { "url": "/srv/mirror/UBotCore.zip", "sha256": sha } },
+        "5.7": { "Win64": { "url": "D:\\mirror\\UBotCore.zip", "sha256": sha } },
+        "5.8": { "Win64": { "url": "\\\\server\\share\\UBotCore.zip", "sha256": sha } }
+    });
+    let errors = validator.validate(&binaries);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let text = serde_json::to_string(&binaries).unwrap();
+    let validation = index::validate_text(&text);
+    assert!(validation.errors.is_empty(), "{:#?}", validation.errors);
+    binaries["packages"][0]["versions"][0]["binaries"] = Value::Null;
+    assert!(validator.validate(&binaries).is_empty(), "null means none");
+    for (bad, fragment) in [
+        (
+            json!({ "5": { "Win64": { "url": "https://h/x.zip", "sha256": sha } } }),
+            "/binaries/5 (name)",
+        ),
+        (json!({ "5.5.1": {} }), "/binaries/5.5.1 (name)"),
+        (
+            json!({ "5.5": { "Win64": { "url": "http://h/x.zip", "sha256": sha } } }),
+            "/binaries/5.5/Win64/url",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/a b.zip", "sha256": sha } } }),
+            "/binaries/5.5/Win64/url",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "relative/x.zip", "sha256": sha } } }),
+            "/binaries/5.5/Win64/url",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/x.zip", "sha256": sha.to_uppercase() } } }),
+            "/binaries/5.5/Win64/sha256",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/x.zip" } } }),
+            "/binaries/5.5/Win64: missing \"sha256\"",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/x.zip", "sha256": sha, "size": 0 } } }),
+            "/binaries/5.5/Win64/size",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/x.zip", "sha256": sha, "size": 3_000_000_000u64 } } }),
+            "/binaries/5.5/Win64/size",
+        ),
+        (
+            json!({ "5.5": { "Win64": { "url": "https://h/x.zip", "sha256": sha, "mirror": "x" } } }),
+            "/binaries/5.5/Win64: unknown property \"mirror\"",
+        ),
+        (json!({ "5.5": "x" }), "/binaries/5.5"),
+        (json!([]), "/binaries"),
+    ] {
+        let mut broken = real.clone();
+        broken["packages"][0]["versions"][0]["binaries"] = bad.clone();
+        let errors = validator.validate(&broken);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.starts_with(&format!("/packages/0/versions/0{fragment}"))),
+            "{bad}: expected an error at {fragment}, got {errors:#?}"
+        );
+        // `ubot index validate` refuses it too (an unknown key is only a warning there).
+        let validation = index::validate_text(&serde_json::to_string(&broken).unwrap());
+        if fragment.contains("unknown property") {
+            assert!(!validation.warnings.is_empty(), "{bad}");
+        } else {
+            assert!(!validation.errors.is_empty(), "{bad}");
+        }
+    }
+
     // A minimal index and every constraint form the reader accepts.
     let mut minimal = json!({ "formatVersion": 2, "packages": [ { "name": "A", "versions": [ { "version": "1.0.0", "planned": true } ] } ] });
     assert!(
@@ -222,6 +298,9 @@ impl Validator<'_> {
             "then",
             "else",
             "contains",
+            "propertyNames",
+            "minimum",
+            "maximum",
         ];
         for keyword in schema.keys() {
             assert!(
@@ -277,6 +356,18 @@ impl Validator<'_> {
                 }
             }
         }
+        if let Some(number) = instance.as_f64() {
+            if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+                if number < minimum {
+                    fail(format!("{number} is less than {minimum}"));
+                }
+            }
+            if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
+                if number > maximum {
+                    fail(format!("{number} is more than {maximum}"));
+                }
+            }
+        }
         if let Some(items) = instance.as_array() {
             if let Some(min) = schema.get("minItems").and_then(Value::as_u64) {
                 if (items.len() as u64) < min {
@@ -312,6 +403,16 @@ impl Validator<'_> {
                     if !object.contains_key(name) {
                         fail(format!("missing \"{name}\""));
                     }
+                }
+            }
+            if let Some(names) = schema.get("propertyNames") {
+                for name in object.keys() {
+                    self.check(
+                        names,
+                        &Value::String(name.clone()),
+                        &format!("{at}/{name} (name)"),
+                        &mut errors_here,
+                    );
                 }
             }
             let properties = schema.get("properties").and_then(Value::as_object);

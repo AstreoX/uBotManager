@@ -15,11 +15,11 @@ use serde::Serialize;
 use ubot_core::model::{
     ApplyOptions, BuildConfiguration, BuildSettings, Change, ChangeKind, EditorState, EngineInfo,
     EngineKind, EnvCheck, EnvCheckId, Fix, FixAction, GitState, GitTestResult, IndexSettings,
-    IndexSourceConfig, IndexSourceStatus, InstallSettings, Lang, Layer, LocalizedText, Msg,
-    PackageInfo, PackageState, Plan, PlanStep, PluginInfo, Problem, ProblemFact, ProblemScope,
-    Progress, ProjectInfo, Recipe, Requirement, RequirementKind, RequirementStatus, RosSettings,
-    RosTestResult, SessionKind, SessionStatus, Settings, SettingsSection, Severity, Snapshot,
-    StepGroup, StepKind, StepStatus, Task, TaskLogEvent, TaskStep, Theme,
+    IndexSourceConfig, IndexSourceStatus, InstallKind, InstallSettings, Lang, Layer, LocalizedText,
+    Msg, PackageInfo, PackageState, Plan, PlanStep, PluginInfo, PrebuiltInfo, Problem, ProblemFact,
+    ProblemScope, Progress, ProjectInfo, Recipe, Requirement, RequirementKind, RequirementStatus,
+    RosSettings, RosTestResult, SessionKind, SessionStatus, Settings, SettingsSection, Severity,
+    Snapshot, StepGroup, StepKind, StepStatus, Task, TaskLogEvent, TaskStep, Theme,
 };
 
 const FIXTURE: &str = concat!(
@@ -96,6 +96,7 @@ fn packages() -> Vec<PackageInfo> {
     let layers = variants!(Layer: Foundation, Capability, Adapter, Content, Unknown);
     let states = variants!(PackageState: Enabled, Disabled, NotInstalled, Planned);
     let requirement_kinds = variants!(RequirementKind: Package, EnginePlugin);
+    let install_kinds = variants!(InstallKind: Git, Prebuilt, Other);
     let requirement_statuses =
         variants!(RequirementStatus: Satisfied, VersionMismatch, NotInstalled, Disabled, Missing);
     let requires: Vec<Requirement> = requirement_statuses
@@ -136,10 +137,20 @@ fn packages() -> Vec<PackageInfo> {
                 update_available: installed,
                 location: installed.then(|| format!("Plugins/uBot/uBotPackage{position}")),
                 git: installed.then(|| GitState {
-                    is_checkout: true,
+                    is_checkout: install_kinds[position % install_kinds.len()] == InstallKind::Git,
                     git_ref: (position == 0).then(|| "v0.1.0".into()),
                     dirty: position == 1,
                 }),
+                // Installed: every kind across the list (the fifth package is git again).
+                install_kind: installed.then(|| install_kinds[position % install_kinds.len()]),
+                prebuilt_available: matches!(position, 1 | 2),
+                // Set exactly for the prebuilt installs; the second one is for another engine.
+                prebuilt: (installed
+                    && install_kinds[position % install_kinds.len()] == InstallKind::Prebuilt)
+                    .then(|| PrebuiltInfo {
+                        engine: if position == 1 { "5.5" } else { "5.4" }.into(),
+                        platform: "Win64".into(),
+                    }),
                 repository: Some(format!(
                     "https://github.com/AstreoX/uBotPackage{position}.git"
                 )),
@@ -339,6 +350,7 @@ fn plans() -> Vec<Plan> {
     let kinds = variants!(
         StepKind: Clone,
         Checkout,
+        Download,
         EnablePackage,
         DisablePackage,
         EnableEnginePlugin,
@@ -355,18 +367,35 @@ fn plans() -> Vec<Plan> {
             n: position as u32 + 1,
             group: groups[position * groups.len() / kinds.len()],
             kind,
-            title: msg(
-                "step.clone",
-                &[("package", "UBotSensor"), ("version", "0.2.0")],
-            ),
-            detail: msg(
-                "step.clone.detail",
-                &[
-                    ("repo", "https://github.com/AstreoX/uBotSensor.git"),
-                    ("dest", "Plugins/uBot/uBotSensor"),
-                ],
-            ),
-            needs_editor_closed: kind != StepKind::Clone,
+            title: if kind == StepKind::Download {
+                msg(
+                    "step.download",
+                    &[("package", "UBotSensor"), ("version", "0.2.0")],
+                )
+            } else {
+                msg(
+                    "step.clone",
+                    &[("package", "UBotSensor"), ("version", "0.2.0")],
+                )
+            },
+            detail: if kind == StepKind::Download {
+                msg(
+                    "step.download.detail",
+                    &[
+                        ("source", "github.com/…/UBotSensor-0.2.0-UE5.5-Win64.zip"),
+                        ("dest", "Plugins/uBot/uBotSensor"),
+                    ],
+                )
+            } else {
+                msg(
+                    "step.clone.detail",
+                    &[
+                        ("repo", "https://github.com/AstreoX/uBotSensor.git"),
+                        ("dest", "Plugins/uBot/uBotSensor"),
+                    ],
+                )
+            },
+            needs_editor_closed: !matches!(kind, StepKind::Clone | StepKind::Download),
         })
         .collect();
     vec![
@@ -383,10 +412,21 @@ fn plans() -> Vec<Plan> {
                     ("range", "^0.1.0"),
                 ],
             )],
-            warnings: vec![msg(
-                "plan.onBranch",
-                &[("package", "UBotCore"), ("branch", "main")],
-            )],
+            warnings: vec![
+                msg(
+                    "plan.onBranch",
+                    &[("package", "UBotCore"), ("branch", "main")],
+                ),
+                msg(
+                    "plan.prebuiltUnavailable",
+                    &[
+                        ("package", "UBotROS"),
+                        ("version", "0.1.0"),
+                        ("engine", "5.5"),
+                    ],
+                ),
+                msg("plan.noCompiler", &[]),
+            ],
         },
         Plan::default(),
     ]
@@ -411,6 +451,23 @@ fn tasks() -> Vec<Task> {
             log_lines: position as u32 * 10,
         })
         .collect();
+    // A download step reports bytes.
+    let mut first_steps = steps.clone();
+    first_steps.push(TaskStep {
+        id: "step-download".into(),
+        title: msg(
+            "step.download",
+            &[("package", "UBotSensor"), ("version", "0.2.0")],
+        ),
+        status: StepStatus::Running,
+        started_at: Some("2026-10-10T08:00:00Z".into()),
+        duration_ms: None,
+        progress: Some(Progress {
+            done: 12_300_000,
+            total: 45_600_000,
+        }),
+        log_lines: 1,
+    });
     // The first task carries a step in every status; the others one step each.
     statuses
         .into_iter()
@@ -423,7 +480,7 @@ fn tasks() -> Vec<Task> {
             started_at: "2026-10-10T08:00:00Z".into(),
             duration_ms: status.is_finished().then_some(64_000),
             steps: if position == 0 {
-                steps.clone()
+                first_steps.clone()
             } else {
                 vec![steps[position].clone()]
             },
@@ -467,7 +524,7 @@ fn settings() -> Vec<Settings> {
             install: InstallSettings {
                 directory: "Plugins/uBot".into(),
                 git: "git".into(),
-                use_prebuilt: false,
+                use_prebuilt: position != 1,
             },
             build: BuildSettings {
                 engine_id: (position == 1).then(|| "5.5".into()),

@@ -59,13 +59,33 @@ Version = {
   "requires": [ { "name": "UBotCore", "version": "^0.1.0", "optional": false } ],
   "enginePlugins": ["ChaosVehiclesPlugin"], // engine plugins that must be enabled
   "provides": ["Sensor.IMU"],             // capability ids
-  "binaries": null                        // RESERVED for prebuilt binaries ({ "Win64": { "url", "sha256" } }); ignored today
+  "binaries": null                        // prebuilt archives per engine and platform (below); null or absent = none
 }
+Binaries = { "5.5": {                     // UE Major.Minor (^\d+\.\d+$)
+               "Win64": {                 // the only platform installed; other keys are ignored (validation warns)
+                 "url": "https://github.com/AstreoX/uBotSensor/releases/download/v0.1.0/UBotSensor-0.1.0-UE5.5-Win64.zip",
+                 "sha256": "<64 lower-case hex digits>",
+                 "size": 12345678         // optional: exact size in bytes, enforced when present
+               } } }
 Recipe = { "id": "ros-sensors", "name": {en, zh-CN}, "description": {en, zh-CN},
            "packages": ["UBotCore", ...], "checks": ["rosBridge"] }   // checks: known ids only, unknown ignored
 Replacement = { "legacy": "AgentSensorCore", "replacement": "UBotSensor",
                 "redirects": "Config/DefaultUBotSensor.ini" }          // redirects: path inside the replacement plugin, optional
 ```
+
+`binaries` lets the manager install a version from a zip of the built plugin instead of cloning and building it
+(§5.2; the archive layout is §1.2):
+
+- The first level is the engine, `Major.Minor` only (`"5.5"`, never `"5.5.4"`); the manager looks up the
+  `Major.Minor` of the project's engine. The second level is the platform; only `"Win64"` is recognised.
+- `url` is required: `https://`, `file://` or an absolute local path (team mirrors, tests). It must pass the
+  repository URL policy (§5.4) and then be one of those three: plain `http://`, `ssh://` and scp-like
+  `user@host:path` are refused, and so is a backslash in an `https://` URL (a downloader and a reader could
+  disagree about the host).
+- `sha256` is required: the SHA-256 of the archive, 64 lower-case hex digits.
+- `size` is optional: the exact size of the archive in bytes, a positive integer of at most 2 GiB. When present it
+  is enforced (§5.3).
+- `null` or an absent `binaries` means none. A planned version has none (validation warns when it lists some).
 
 Derived values:
 
@@ -75,7 +95,9 @@ Derived values:
 - A reader (`index::parse`) is strict about the shape: the text is a JSON object (a leading BOM is
   dropped) with `formatVersion` 2 (a file with only the format 1 key `FormatVersion` is told so) and a
   `packages` array whose entries deserialize; `name`, when present, is a string. Unknown keys are
-  ignored when reading and reported by validation.
+  ignored when reading and reported by validation. A version's `binaries` is kept as written: a broken
+  entry does not make the index unreadable (validation reports it), and the planner is offered an entry
+  only when it is usable (URL policy, SHA-256 and size valid; never for a planned version).
 - Validation (`ubot index validate <file>`, CI-style) is stricter than the shape above. **Errors**
   (exit 1):
   - the file does not parse as above;
@@ -84,11 +106,18 @@ Derived values:
     `description.en` empty; `repository` missing although some version is not planned, or rejected by the
     URL policy (§5.4); install folder (explicit or derived) not one safe path segment
     (`^[A-Za-z0-9._-]+$`, not `.`/`..`), or not derivable from the repository; `versions` empty;
-  - version: does not parse or is listed twice; not planned and without `ref`, or with a `ref` that is not
+  - version: does not parse or is listed twice; `version` has a character other than a letter, a digit,
+    `.`, `-` or `+` (it becomes part of archive file names and download URLs, and SemVer parsing alone would
+    let `1.0.0+x/../y` through); not planned and without `ref`, or with a `ref` that is not
     a safe git ref (no leading `-`, no `..`, no whitespace or control characters, none of `~ ^ : ? * [ \ "`;
     the same rule as `FUBotPackageIndex::IsSafeGitRef`, tested with the same vectors); `engine` or
     `requires[].version` is not a constraint; a `requires` entry with an empty name or a name that is not in
     this index; an `enginePlugins` entry that is not a plugin name;
+  - `binaries` (null is fine): not an object; an engine key that is not `Major.Minor` (`"5"`, `"5.5.1"`);
+    an engine value that is not an object of platforms; for the platform `Win64`: an entry that is not an
+    object, a missing or non-string `url` or one the binaries URL policy refuses (§1; the message names the
+    reason), a `sha256` that is not 64 lower-case hex digits, a `size` that is not a positive integer or
+    is over 2 GiB;
   - a dependency cycle (non-optional requirements, using the latest, else the highest planned, version of
     each package);
   - recipe: empty or duplicate `id` (case-insensitive), empty `name.en` or `description.en`, no
@@ -99,8 +128,10 @@ Derived values:
   **Warnings** (exit 0): no index `name`; package without `layer` or `description`; missing `zh-CN` text
   (packages and recipes); a plain `http://` repository; two packages that install into the same folder;
   `ref` on a planned version; a recipe check id that is not known (only `rosBridge` is; unknown ids are
-  ignored); unknown keys at any level.
-- `Index/index.schema.json` is a JSON Schema (draft 2020-12) of the shape above.
+  ignored); unknown keys at any level (inside a `binaries` entry too); a platform other than `Win64` in
+  `binaries` (it is ignored); `binaries` on a planned version.
+- `Index/index.schema.json` is a JSON Schema (draft 2020-12) of the shape above, `binaries` included (engine
+  keys by pattern, `url` and `sha256` by pattern, `size` between 1 and 2 GiB, no other keys in an entry).
 
 ### 1.1 Index sources
 
@@ -143,7 +174,9 @@ per legacy name. Failed sources are skipped, so the remote → local copy order 
 After every refresh with a project open, the manager writes the merged index (format 2, `name`
 = "merged") to `<Project>/Saved/uBot/index.json` for the UE panel (§9), when its text changed.
 Repository URLs in that file keep embedded credentials, because UE clones with them; everything the
-manager shows or logs has them redacted (§5.4). The desktop app writes the file on every refresh; the
+manager shows or logs has them redacted (§5.4). `binaries` URLs, which UE ignores, are written without
+credentials, query and fragment (a signed download link keeps its token in the query); the same goes for
+the index shown by `ubot index show`. The desktop app writes the file on every refresh; the
 CLI only when it applies changes (`apply`, `recipe`), so its read-only commands leave the project untouched.
 
 Fetching: `syncOnStart: true` → the app starts in two phases (§12): a quick rescan from local files and
@@ -152,6 +185,20 @@ caches without any network access (a source that was never cached shows as "not 
 and did not fail earlier in this session. Rescans made by `plan` and `apply` never use the network. The
 CLI does the equivalent of the second phase for every command except `index validate` and `engines`
 (`sync = syncOnStart`, never with `--offline`).
+
+### 1.2 Prebuilt archives
+
+The zip that `binaries[engine]["Win64"].url` points to (made by `ubot package`, §10) has exactly one top-level
+folder, named after the plugin (`UBotSensor/`; compared case-insensitively), holding `UBotSensor.uplugin`,
+`Binaries/Win64` (`UnrealEditor-*.dll` and `UnrealEditor.modules`), `Source`, `Resources`, `Config` and so on.
+It has no `.git`, `Intermediate`, `Saved` or `DerivedDataCache` folder and no `*.pdb`, `*.exp` or `*.lib`
+file (unless packed with `--with-symbols`), and nothing named `.ubot-*` directly in the plugin folder. The file
+name is `<Name>-<version>-UE<Major.Minor>-Win64.zip` (`UBotSensor-0.1.0-UE5.5-Win64.zip`), next to a
+`<file>.sha256` text file; the index may point anywhere, the name is only a convention. An archive is built
+against a launcher (installed) engine, whose binaries are the same on every machine; that is why the manager
+installs them only for launcher engines (§5.2).
+
+What the manager checks before it installs one is §5.3 (`download`). The install marker it writes is §3.
 
 ## 2. Versions and constraints
 
@@ -168,8 +215,9 @@ whitespace-separated comparators with `= >= > <= < ^ ~`, X-range partials, and u
 - **Plugin discovery** (installed packages): search `<ProjectDir>/Plugins` and every entry of the
   `.uproject` `AdditionalPluginDirectories` (relative to the project dir). Recurse into directories;
   when a directory contains a `*.uplugin`, record it and do not descend further. Skip `Binaries`,
-  `Intermediate`, `Saved`, `DerivedDataCache`, `.git`, `node_modules` (recursion depth at most 16,
-  entries visited in path order). UE refuses two plugins with one name, so the first one found is the
+  `Intermediate`, `Saved`, `DerivedDataCache`, `.git`, `node_modules` and every folder whose name starts
+  with `.ubot-` (the manager's own: a download being extracted, the previous version of a package during its
+  replacement; §5.3) (recursion depth at most 16, entries visited in path order). UE refuses two plugins with one name, so the first one found is the
   one kept. All discovered plugins are kept (for legacy detection and enable/disable); those whose
   descriptor has a top-level `"UBot"` object (or that cannot be parsed but mention one) are **uBot
   packages**.
@@ -215,8 +263,8 @@ whitespace-separated comparators with `= >= > <= < ^ ~`, X-range partials, and u
 - **Build target** (`ProjectInfo.buildTarget`): `<Name>Editor` when UBT can resolve that target: the
   project has `Source/*.Target.cs`, or an enabled plugin lives outside `<ProjectDir>/Plugins` (an
   `AdditionalPluginDirectories` root: UBT then makes a temporary target in `Intermediate/Source` itself,
-  a "hybrid" project; this is how DevHost builds `UBotDevEditor`), or a plan is about to clone into such a
-  root, or UBT's temporary `Intermediate/Source/<Name>Editor.Target.cs` already exists. Otherwise (a
+  a "hybrid" project; this is how DevHost builds `UBotDevEditor`), or a plan is about to clone (or download,
+  for a new folder) into such a root, or UBT's temporary `Intermediate/Source/<Name>Editor.Target.cs` already exists. Otherwise (a
   content-only project whose plugins all sit in `<ProjectDir>/Plugins`) the stock `UnrealEditor` target
   is built with `-Project=`. A `<Name>Editor` build that fails with UBT's "find target rules file" message
   is retried once as `UnrealEditor` (§5.3). `hasCode` = `<ProjectDir>/Source` exists (informational only).
@@ -242,6 +290,36 @@ whitespace-separated comparators with `= >= > <= < ^ ~`, X-range partials, and u
   `ref` are then unknown, never assumed clean. The git executable (`settings.install.git`) must name git
   itself: no quotes or control characters, no `cmd`/`powershell`/`pwsh`/`sh`/`bash`, no
   `.bat`/`.cmd`/`.ps1`.
+- **Install kind** (`PackageInfo.installKind`, `null` when the plugin is not installed): `git` when the
+  folder is a git checkout (`.git` exists, above), else `prebuilt` when it holds a valid install marker,
+  else `other` (a folder copied in by hand, a zip, a shared project). A `.git` folder wins over a marker.
+  The **install marker** `<plugin dir>/.ubot-install.json` is written by the manager after it extracted an
+  archive (§5.3) and never taken from the archive, which may not contain one:
+
+  ```jsonc
+  {
+      "kind": "prebuilt",
+      "package": "UBotSensor",
+      "version": "0.1.0",
+      "engine": "5.5",                  // Major.Minor of the engine the binaries were built for
+      "platform": "Win64",
+      "url": "https://github.com/AstreoX/uBotSensor/releases/download/v0.1.0/UBotSensor-0.1.0-UE5.5-Win64.zip",
+      "sha256": "<64 lower-case hex digits>",
+      "installedAt": "2026-10-10T08:00:00Z"      // RFC 3339
+  }
+  ```
+
+  It is valid when it is a file of at most 64 KiB that parses, has `kind` `prebuilt`, a `package` equal
+  (case-insensitively) to the plugin's name, a SemVer `version`, an `engine` of the form `Major.Minor` and a
+  non-empty `platform`; a copied folder with another package's marker is therefore `other`. `url` is stored
+  without credentials, query and fragment (§5.4; an absolute local path is kept as written). The marker's
+  `engine` is shown as written (`PackageInfo.prebuilt`, §7) whatever the project's engine is.
+- **Prebuilt eligibility**: installing or updating a package uses prebuilt binaries when
+  `settings.install.usePrebuilt` is on, the project's engine has kind `launcher`, and the version has a usable
+  `binaries[<engine Major.Minor>]["Win64"]` entry (§1). `PackageInfo.prebuiltAvailable` is that test for the
+  package's latest version, and false for a git checkout (it updates with git). A source or custom engine
+  is never eligible: it is its own build, while the archives are made with a launcher engine, whose binaries
+  are the same on every machine.
 - **Package identity** is case-insensitive everywhere; display the index casing (or descriptor
   casing for packages missing from the index).
 
@@ -260,6 +338,7 @@ project in settings (key: the absolute `.uproject` path, compared case-insensiti
 | `enginePluginMissing` {package, plugin} | `enginePlugin:<pkg>:<plugin>` | error | pkg | package, plugin, engine | `fix.ignore` |
 | `enginePluginDisabled` {package, plugin} | same | warning | pkg | package, plugin | `fix.enable` {package: plugin} → `[enable plugin]` |
 | `legacyConflict` {legacy, replacement} | `legacy:<legacy>` | warning | `<Name>.uproject` | legacy = "AgentSensorCore 0.5.0", replacement = "UBotSensor 0.1.0", redirects = path (if any) | `fix.disable` {package: legacy} → `[disable legacy]`; `fix.ignore` |
+| `prebuiltEngineMismatch` {package, built, engine} | `prebuilt:<pkg>` | warning | pkg | package = "Pkg 0.1.0", engine = the project's engine version ("5.5.4") | `fix.reinstall` {package} → `[update pkg@<installed version>]` (only when the planner could do it, see below); `fix.disable` |
 | `descriptorInvalid` {package, detail} | `descriptor:<pkg>` | warning | pkg | file = descriptor path | — |
 | `dependencyCycle` {cycle} | `cycle:<first>` | error | pkg | — | — |
 | `engineNotFound` {association} | `engine` | error | `<Name>.uproject` | — | `fix.openBuildSettings` → openSettings build |
@@ -268,6 +347,15 @@ project in settings (key: the absolute `.uproject` path, compared case-insensiti
 | `rosBridgeUnreachable` {address} (also produced by the manager when `ros.checkOnRefresh` and UBotROS is enabled and a 2 s TCP connect fails) | `session:ros.bridge` / `ros:bridge` | info | `UBotROS` | address | `fix.openRosSettings` |
 
 Scopes: session problems (from `status.json`) have `scope: "session"`, everything else `"packages"`.
+
+**Prebuilt engine mismatch.** UE does not load the modules of a plugin built for another engine version. The
+problem is raised for an **enabled** package with an install kind of `prebuilt` (§3) whose marker `engine` differs
+from the `Major.Minor` of the project's engine (`built` = the marker's engine, `engine` = the project's
+`Major.Minor`). Nothing is raised for a disabled package, or when the engine is not known. `fix.reinstall` is
+offered (and is then the primary fix) only when the planner could carry it out: `usePrebuilt` is on, the engine
+is a launcher install, and the index has binaries of the *installed* version for this engine; otherwise
+`fix.disable` is the only fix. It is an `update` of the package to the version it already has, which the planner
+allows for a prebuilt install (§5.2): it downloads the archive for this engine again and replaces the folder.
 
 **Index source problems.** One per source that failed to load. A source that is merely *unavailable*
 (the local copy without an installed UBotCore, §1.1) raises none. The severity follows what is lost:
@@ -278,8 +366,8 @@ not about a package: whatever the source is called (the built-in source is named
 package) they are never in a package's `problemIds`, and they are grouped under the fixed
 `Package Index` title.
 
-**Owners.** `PackageInfo.problemIds` holds the package's own requirement, engine plugin, descriptor and
-cycle problems; the legacy conflicts it resolves (a conflict belongs to the *replacement* package although
+**Owners.** `PackageInfo.problemIds` holds the package's own requirement, engine plugin, prebuilt engine,
+descriptor and cycle problems; the legacy conflicts it resolves (a conflict belongs to the *replacement* package although
 its group is the project file); the manager's ROS check for `UBotROS`; and the session problems whose
 `package` names it. Project (`engine`), index and unowned session problems belong to no package.
 
@@ -309,10 +397,15 @@ project open, any change is the error `plan.noProject`.
 
 - **install X[@v]**: any plugin named X already in the project → `plan.alreadyInstalled`. X must exist
   in the index (`plan.notInIndex`) with a non-planned version (`plan.planned`; default latest; `v` must
-  exist, else `plan.noVersion`). Its name, `ref`, repository URL and install folder must be safe
-  (`plan.unsafeName`, `plan.unsafeRef`, `plan.unsafeUrl`). The package is cloned at the version's `ref`
-  (§5.3) into `<ProjectDir>/<install.directory>/<folder>`, where `folder` is the index entry's `folder`
-  (default: the last segment of the repository URL without `.git`). The install directory must be a
+  exist, else `plan.noVersion`). Its name, repository URL and install folder must be safe
+  (`plan.unsafeName`, `plan.unsafeUrl`), and so must the version's `ref` when the package is cloned
+  (`plan.unsafeRef`). The package is installed into `<ProjectDir>/<install.directory>/<folder>`, where
+  `folder` is the index entry's `folder` (default: the last segment of the repository URL without
+  `.git`): by a `download` step (§5.3) from the version's prebuilt binaries when the install is eligible
+  for them (§3: `usePrebuilt`, a launcher engine, binaries for this engine), else by a `clone` step at
+  the version's `ref`. When `usePrebuilt` is on and the engine is a launcher install but the version has
+  no binaries for it, the plan warns `plan.prebuiltUnavailable` {package, version, engine} and clones;
+  with the setting off or another kind of engine it clones without a warning. The install directory must be a
   plugin root of the project — `<ProjectDir>/Plugins` or an `AdditionalPluginDirectories` entry, or
   inside one — because UE and the manager find packages only there (`plan.notPluginDir` when it lies
   inside the project elsewhere, `plan.outsideProject` when it lies outside the project and outside every
@@ -327,10 +420,21 @@ project open, any change is the error `plan.noProject`.
   index version. Required engine plugins → enable if not enabled (`plan.enginePluginMissing` if the
   engine lacks it; without an engine the entry is written unchecked). Then enable X.
 - **update X[@v]** (also used for downgrades): X installed (`plan.notInstalled`), in the index
-  (`plan.notInIndex`) with that version (`plan.noVersion`); a version equal to the installed one changes
-  nothing. X must be a git checkout (`plan.notGit`), whose state git could read (`plan.gitUnreadable`,
-  §3) and that is clean (`plan.dirty`). Warning `plan.onBranch` when the checkout is on a branch (it will
-  be detached at the tag). A package this plan also clones is cloned at the new version instead.
+  (`plan.notInIndex`) with that version (`plan.noVersion`). What happens depends on the install kind (§3):
+  - `git`: a `checkout` of the version's `ref`, also when that version has binaries (a checkout stays
+    git). Git must be able to read its state (`plan.gitUnreadable`, §3) and it must be clean
+    (`plan.dirty`). Warning `plan.onBranch` when the checkout is on a branch (it will be detached at the
+    tag).
+  - `prebuilt` or `other`: replaced by the version's prebuilt binaries, a `download` step that swaps the
+    folder (§5.3), when the update is eligible (§3). Otherwise the error `plan.noPrebuilt` {package, version,
+    engine}: uninstall it and install it again to build from source (without a known engine version it is
+    `plan.notGit`). The folder must not be a plugin root that holds other plugins (`plan.pluginRoot`).
+  - A version equal to the installed one changes nothing, except that an `update` the user asked for on a
+    `prebuilt` install downloads the same version again (`fix.reinstall`, §4: other engine, repair), or is
+    `plan.noPrebuilt` when that is not possible.
+  - A package this plan also installs is installed at the new version instead (cloned, or downloaded when
+    that version has binaries).
+
   Requirements of the target version are resolved as for install when X is enabled.
 - **enable X**: X is a discovered plugin or an engine plugin (`plan.notInstalled` otherwise); resolve
   requirements as for install (enable/install/update deps); engine plugins.
@@ -349,17 +453,31 @@ project open, any change is the error `plan.noProject`.
   the problems list (§4).
 - Errors (`plan.*` Msgs) make the plan unappliable; warnings are shown and do not block.
 
-Step order and groups: `download` (clone, checkout — dependencies first) → `project` (enable engine
-plugins, then enable packages in dependency order, disable dependents-first, remove entries) → `build`
-→ `after`. `build` is planned when something needs building — any clone, checkout, package enable or
-engine plugin enable — and `options.build`; it needs the project's engine (`plan.noEngine` when
-something needs building, `options.build` or `options.runTests` is set and no engine was found), a plain
-target name and no `%` in the `.uproject` or engine path (`plan.unsafeProjectName`,
-`plan.unsafeBuildPath`: `cmd.exe` would expand it). `after` holds `runTests` when `options.runTests` and
-the plan cloned, checked out or enabled uBot packages (their names make the test filter), then
-`openEditor` when `options.reopenEditor`, the editor was running or the plan has a build step, and the
-plan has any step. The app shows the `after` group as "Finish" / "完成后". Steps are numbered from 1
-(`id` = `s<n>`). `needsEditorClosed` is true for every step except `clone`.
+Step order and groups: `download` (clone, checkout, download — dependencies first) → `project` (enable
+engine plugins, then enable packages in dependency order, disable dependents-first, remove entries) →
+`build` → `after`.
+
+**Build.** `Plan.needsBuild` is true when the plan touches code — it clones, checks out, downloads or enables a
+package, or enables an engine plugin — and some package ends up enabled whose code is built from source:
+the plan clones or checks it out, or it has code modules (`Modules` in its `.uplugin`) but no
+`Binaries/Win64/UnrealEditor-*.dll`. A package the plan downloads, or whose folder has a valid install marker
+(`prebuilt`, §3), counts as built, and so does a plugin without modules. Enabling an engine plugin also needs
+a build when the engine is not a launcher install. So a plan whose code all comes prebuilt has no `build`
+step. `build` is planned when `needsBuild` and `options.build`; it needs the project's engine
+(`plan.noEngine` when the plan needs a build, `options.build` or `options.runTests` is set and no engine
+was found), a plain target name and no `%` in the `.uproject` or engine path (`plan.unsafeProjectName`,
+`plan.unsafeBuildPath`: `cmd.exe` would expand it). When a `build` step is planned and Visual Studio 2022 is
+not found (the `vs2022` environment check of §7, remembered for a minute), the plan gets the warning
+`plan.noCompiler`; it does not block.
+
+`after` holds `runTests` when `options.runTests` and the plan cloned, checked out, downloaded or enabled
+uBot packages (their names make the test filter), then `openEditor` when `options.reopenEditor`, the editor
+was running or the plan has a build step, and the plan has any step. Both need the engine, and neither
+depends on a build step: a prebuilt-only plan can still run tests, and reopens the editor if it was
+running. The app shows the `after` group as "Finish" / "完成后". Steps are numbered from 1
+(`id` = `s<n>`). `needsEditorClosed` is true for every step except `clone` and a `download` into a
+folder that does not exist yet (a `download` that replaces an installed folder needs the editor closed, as
+it may have the old binaries loaded).
 
 ### 5.3 Execution (tasks)
 
@@ -368,7 +486,7 @@ plan has any step. The app shows the `after` group as "Finish" / "完成后". St
   error, one per line. Steps run sequentially on a background thread; each step streams its process
   output line by line (stdout + stderr, UTF-8 lossy, `\r` progress lines split, credentials in URLs
   redacted) to the task log. A failed step fails the task and skips the remaining steps; nothing is
-  rolled back, except the partial clone below.
+  rolled back, except the partial clone and what a download wrote (below).
 - Before a `needsEditorClosed` step, if the editor runs this project: when
   `settings.build.waitForEditor` the step becomes `waiting` and polls every second until the editor
   exits; otherwise the step fails with `task.editorRunning`.
@@ -381,6 +499,44 @@ plan has any step. The app shows the `after` group as "Finish" / "完成后". St
   `git -C <dir> fetch --tags --no-recurse-submodules origin`, resolves `<ref>` itself (the tag
   `refs/tags/<ref>`, else `refs/remotes/origin/<ref>`, else whatever git makes of the name) and runs
   `git -C <dir> checkout --detach <commit>`.
+- `download`: installs prebuilt binaries (§1.2) into `<dest>`, the package folder. It refuses a `<dest>` that is
+  a plugin root holding other plugins. Its temporary files sit in the install directory next to `<dest>`
+  (plugin discovery skips them, §3): `.ubot-download-<Name>.zip.part`, `.ubot-extract-<Name>/` and
+  `.ubot-old-<Name>/`; leftovers of an interrupted run are removed first (an `.ubot-old-<Name>` is not:
+  the step fails and asks to move it away). In order:
+  1. **Fetch** into the `.part` file. A `file://` URL or an absolute local path is copied. Anything else is
+     an HTTPS GET (`reqwest`, blocking, environment proxies `HTTPS_PROXY`/`HTTP_PROXY`): 30 s connect and
+     read timeout, at most 5 redirects, never from https to http, plain `http://` only to the machine itself
+     (local test servers), a non-success status fails the step. The transfer runs on its own thread, so a
+     cancel is noticed within 0.1 s even when the network is silent. The step's `progress` is
+     `{done, total}` in bytes (`total` = the index's `size`, else the `Content-Length`, else 0 while
+     unknown). The limit is 2 GiB, or exactly `size` when the index lists one: a `Content-Length` or a byte
+     count that differs from `size` fails the step.
+  2. **Verify** the SHA-256 against the index entry (a mismatch fails the step; the file is deleted).
+  3. **Extract** into `.ubot-extract-<Name>/`. Every entry is checked before anything is written, and the step
+     fails on: an absolute path, a drive letter or a `:` (NTFS stream), a `.` or `..` component, a control
+     character, a name Windows cannot hold (`CON`, a trailing dot or space, `<>"|?*`), a symbolic link, an
+     encrypted entry, a `.git` folder at any depth, a file at the top level, more than one top-level folder or
+     one not named after the package (case-insensitive), an entry named `.ubot-*` directly in the plugin folder,
+     an entry that appears twice, more than 200000 entries, or more than 8 GiB extracted.
+  4. **Check** that `<Name>.uplugin` is in the plugin folder and its `VersionName` equals the planned version
+     (SemVer equality), and, for a plugin whose descriptor lists `Modules`, that `Binaries/Win64` holds an
+     `UnrealEditor-*.dll` and `UnrealEditor.modules`: the planner counts a prebuilt package as built, so a
+     source-only archive is refused instead of being installed unbuilt.
+  5. **Mark**: write `.ubot-install.json` (§3) into the extracted folder: `engine` is the project engine's
+     `Major.Minor` the plan chose the binaries for, `sha256` the verified one, `url` without credentials,
+     query and fragment, `installedAt` now.
+  6. **Swap**. If `<dest>` exists it is renamed to `.ubot-old-<Name>`, the extracted folder is renamed to
+     `<dest>`, and only then the old folder goes to the Recycle Bin (or is deleted permanently, see
+     `removePackage`). If the move fails the old folder is put back; if removing it fails the new folder is
+     moved out again and the old one restored, and the step fails. Renames are retried for about a second,
+     because virus scanners hold fresh binaries open.
+
+  Cancel and failure delete the `.part` file and the extraction folder (the log says so) and leave the
+  installed folder untouched until the swap. The step's log is English and shows the source as host and file
+  name only (`github.com/…/UBotSensor-0.1.0-UE5.5-Win64.zip`), never the full URL or its query: "Downloading
+  <source>" (or "Copying"; followed by " (<size> MB)" when the index lists a size), "Received …",
+  "SHA-256 … verified", "Extracted …", "Installed <Name> <version> (prebuilt for UE <x.y> Win64) in <dest>".
 - `enablePackage`, `disablePackage`, `enableEnginePlugin`: edit the `.uproject` (§3) and log the entry.
   `removePackage`: remove the entry, then move the folder to the Recycle Bin; it fails for a folder
   outside the project or one that is a plugin root. Tests and CI replace the Recycle Bin: the CLI deletes
@@ -397,7 +553,9 @@ plan has any step. The app shows the `after` group as "Finish" / "完成后". St
   "exit code 255").
 - `openEditor`: start `<EngineRoot>\Engine\Binaries\Win64\UnrealEditor.exe "<uproject>"` detached.
 - Cancel kills the running child process tree (`taskkill /T /F /PID`), marks the step `canceled`
-  and the remaining steps `skipped`. A step that is `waiting` for the editor is canceled the same way.
+  and the remaining steps `skipped`. A step that is `waiting` for the editor is canceled the same way. A
+  `download` has no child process: cancel stops the transfer or the extraction, and the step removes its
+  temporary files.
   Closing the app (and Ctrl+C in the CLI) cancels the running task; the app waits up to 10 s for it to
   clean up.
 - Task history (last 30 tasks, each step log capped at 5000 lines) persists in `<data>/tasks.json`.
@@ -410,7 +568,7 @@ plan has any step. The app shows the `after` group as "Finish" / "完成后". St
   (settings) with id `user-<slug of the name>` (lower-case letters and digits, other runs replaced by
   `-`; the same name replaces the earlier recipe).
 
-### 5.4 URL policy (repository URLs from any index)
+### 5.4 URL policy (repository and archive URLs from any index)
 
 Allowed: `https://…`, `http://…` (warning), `ssh://…`, scp-like `user@host:path`, `file://…`, and
 absolute local paths (for team mirrors and tests). Rejected: anything starting with `-`, containing
@@ -419,6 +577,13 @@ or whitespace. Logged/displayed URLs, task logs, error texts and problem texts h
 redacted (`https://user:token@host` → `https://***@host`; `ssh://git@host` keeps its plain user name,
 `user:password` pairs never survive). The same rule is implemented in C++ by
 `FUBotPackageService::IsRepositoryUrlAllowed`. Index *sources* have their own, stricter rule (§1.1).
+
+Archive URLs (`binaries`, §1) must satisfy the same rule and, on top of it, be `https://`, `file://` or an absolute
+local path (no plain `http://`, `ssh://` or scp-like URL, no backslash in an `https://` URL). What the manager
+shows of one is only its host and file name: a `download` step's detail is `github.com/…/<file>` (for
+`file://` and local paths the path), and the log lines and error texts of the step name it that way too. What it
+stores in the install marker and in `Saved/uBot/index.json` has credentials, query and fragment removed (a
+local path is kept as written).
 
 ## 6. Settings
 
@@ -435,7 +600,7 @@ defaults:
   "language": "en",                 // "en" | "zh-CN"; first run: zh-CN when the OS UI language is Chinese
   "theme": "dark",                  // "dark" | "light" | "system"
   "index": { "sources": [/* §1.1 defaults */], "syncOnStart": true, "showPlanned": true },
-  "install": { "directory": "Plugins/uBot", "git": "git", "usePrebuilt": false },
+  "install": { "directory": "Plugins/uBot", "git": "git", "usePrebuilt": true },
   "build": { "engineId": null, "configuration": "Development", "waitForEditor": true,
              "reopenEditor": true, "runTests": false },
   "ros": { "host": "127.0.0.1", "port": 8268, "checkOnRefresh": true },
@@ -459,8 +624,10 @@ Reading is tolerant: a value of the wrong type resets only its own key (a team i
 `syncOnStart`), invalid elements of a list are dropped, and the settings are normalized — the built-in
 index sources are restored (§1.1), blank install directory / git / ROS host / port 0 take their defaults,
 a blank `engineId` becomes `null`, `recentProjects` has no blanks or case-insensitive duplicates and at
-most 10 entries (newest first). `install.usePrebuilt` is reserved and has no effect today (the dialog
-shows it disabled). The first run (no `language` key) picks `zh-CN` when the OS UI language is Chinese.
+most 10 entries (newest first). `install.usePrebuilt` (default `true`; "Use prebuilt binaries when
+available") makes installs and updates take prebuilt binaries wherever §3 and §5.2 allow it; a settings file
+that has the key keeps its value, one without it (or with a value of another type) gets `true`. The first run
+(no `language` key) picks `zh-CN` when the OS UI language is Chinese.
 `lastProject` is reopened at startup only if the file still exists. `open_project` is the only thing that
 changes `recentProjects`/`lastProject`: `save_settings` ignores what the caller sends for them, so a copy
 of the settings loaded earlier cannot revert them. The file is written with 4-space indentation and a
@@ -498,6 +665,8 @@ export interface Requirement {
   installedVersion: string | null;
 }
 export interface GitState { isCheckout: boolean; ref: string | null; dirty: boolean }
+/** What the install marker of a prebuilt install says it was built for (§3). */
+export interface PrebuiltInfo { engine: string; platform: string }   // engine = "5.5" (Major.Minor), platform = "Win64"
 export interface PackageInfo {
   name: string; friendlyName: string; description: LocalizedText; layer: Layer; state: PackageState;
   installedVersion: string | null; latestVersion: string | null;
@@ -506,6 +675,9 @@ export interface PackageInfo {
   updateAvailable: boolean;
   location: string | null;          // project-relative, '/' separators ("Plugins/uBot/uBotSensor", "../Plugins/uBot/uBotCore")
   git: GitState | null;             // null when not installed
+  installKind: 'git' | 'prebuilt' | 'other' | null;   // §3; null when not installed
+  prebuiltAvailable: boolean;       // an install or update of it would use prebuilt binaries for this project right now
+  prebuilt: PrebuiltInfo | null;    // set exactly when installKind is 'prebuilt'
   repository: string | null; webUrl: string | null; docsUrl: string | null;
   indexSource: string | null;       // id of the source that defined it
   requires: Requirement[]; provides: string[]; tags: string[];
@@ -553,7 +725,7 @@ export interface Snapshot {
 export type ChangeKind = 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
 export interface Change { kind: ChangeKind; package: string; version: string | null }
 export type StepGroup = 'download' | 'project' | 'build' | 'after';
-export type StepKind = 'clone' | 'checkout' | 'enablePackage' | 'disablePackage' | 'enableEnginePlugin'
+export type StepKind = 'clone' | 'checkout' | 'download' | 'enablePackage' | 'disablePackage' | 'enableEnginePlugin'
   | 'removePackage' | 'build' | 'runTests' | 'openEditor';
 export interface PlanStep { id: string; n: number; group: StepGroup; kind: StepKind; title: Msg; detail: Msg; needsEditorClosed: boolean }
 export interface ApplyOptions { build: boolean; reopenEditor: boolean; runTests: boolean }
@@ -590,13 +762,25 @@ Notes on the types:
   not list (its layer, description and requirements then come from its descriptor), sorted by layer
   (Foundation, Capability, Adapter, Content, Unknown), then by name. For a listed package the index
   casing of the name wins. `PackageInfo.repository` and `webUrl` have credentials removed.
+- `PackageInfo.installKind` is `git` (a `.git` checkout), `prebuilt` (a valid `.ubot-install.json` marker) or
+  `other` (neither), `null` when the package is not installed (§3). `prebuiltAvailable` is true when an install
+  of the package, or an update of one that is not a git checkout, would use prebuilt binaries for this project
+  now (`usePrebuilt`, a launcher engine, binaries for its `Major.Minor` in the package's latest version, §3).
+  `prebuilt` is the marker's engine and platform, set exactly when `installKind` is `prebuilt`, even for a
+  disabled package and whatever the project's engine is: it is what the details pane shows, and what the
+  `prebuiltEngineMismatch` problem (§4) compares with the engine.
+- `TaskStep.progress` counts `[n/m]` build actions for a `build` step and **bytes** for a `download` step
+  (`total` is 0 while the size is unknown); both are clamped to 32 bits, which the 2 GiB limit never reaches.
 - `IndexSourceStatus.ok` is false for a source that is served from its cache (`fromCache: true`), and for
   one that is unavailable; `packages` still counts what was loaded (§1.1).
 - `Problem.group` is display text: a package name, the `.uproject` file name, or the fixed string
   `Package Index` for index source problems (§4). `ProblemFact.valueMsg`, when set, is shown instead of
   `value`.
-- `Plan.changes` is the changes as resolved by the planner (§5.2). `PlanStep.group` `after` is displayed
-  as "Finish" / "完成后"; see §5.2.
+- `Plan.changes` is the changes as resolved by the planner (§5.2). `Plan.needsBuild` is true when the plan
+  needs a C++ build (§5.2, Build), whether or not `options.build` put a `build` step in. `PlanStep.group`
+  `after` is displayed as "Finish" / "完成后"; see §5.2. A `download` step's `title` is `step.download`
+  {package, version} and its `detail` is `step.download.detail` {source, dest}, where `source` is the host and
+  file name of the archive and never the whole URL (§5.4).
 - `Msg.params` are plain strings; the frontend fills `{name}` placeholders of the locale template.
 
 Commands (all async on the JS side). Errors reject with an English string. Plan and task rejections are
@@ -652,6 +836,7 @@ table is in both files with the parameters listed here.
 | problem.engineNotFound | Engine {association} for this project was not found. | 找不到此项目使用的引擎 {association}。 |
 | problem.indexSourceFailed | Could not load {source}: {error} | 无法加载 {source}：{error} |
 | problem.rosBridgeUnreachable | Could not connect to ubot_ros_bridge at {address}. | 无法连接 {address} 上的 ubot_ros_bridge。 |
+| problem.prebuiltEngineMismatch {package, built, engine} | {package} was installed prebuilt for UE {built}, but this project uses UE {engine}. | {package} 安装的是 UE {built} 的预编译版本，但此项目使用 UE {engine}。 |
 | fact.package / requires / installed / legacy / replacement / redirects / source / address / time / plugin / engine / file | Package / Requires / Installed / Legacy plugin / Replaced by / Redirects / Source / Address / Time / Plugin / Engine / File | Package / 依赖 / 已安装 / 旧插件 / 替代为 / 重定向 / 来源 / 地址 / 时间 / 插件 / 引擎 / 文件 |
 | session.lastPie / lastEditor / lastGame | last PIE session / last editor session / last game session | 上次 PIE 运行 / 上次编辑器运行 / 上次游戏运行 |
 | fix.updateTo {package, version} | Update {package} to {version} | 将 {package} 更新到 {version} |
@@ -661,10 +846,13 @@ table is in both files with the parameters listed here.
 | fix.ignore | Ignore | 忽略 |
 | fix.openRosSettings | Open ROS Settings | 打开 ROS 设置 |
 | fix.openBuildSettings | Open Build Settings | 打开编译设置 |
+| fix.reinstall {package} | Reinstall {package} | 重新安装 {package} |
 | step.clone {package, version} | Clone {package} {version} | 克隆 {package} {version} |
 | step.clone.detail {repo, dest} | {repo} → {dest} | {repo} → {dest} |
 | step.checkout {package, version} | Check out {package} {version} | 检出 {package} {version} |
 | step.checkout.detail {from, to} | {from} → {to} | {from} → {to} |
+| step.download {package, version} | Download {package} {version} | 下载 {package} {version} |
+| step.download.detail {source, dest} | {source} → {dest} | {source} → {dest} |
 | step.enablePackage {package} | Enable {package} | 启用 {package} |
 | step.disablePackage {package} | Disable {package} | 禁用 {package} |
 | step.enableEnginePlugin {plugin} | Enable {plugin} | 启用 {plugin} |
@@ -703,6 +891,9 @@ table is in both files with the parameters listed here.
 | plan.unsafeBuildPath {path} | {path} contains a % character, which the Windows build scripts would expand. | {path} 含有 % 字符，Windows 构建脚本会对其展开。 |
 | plan.projectReadOnly {file} | {file} is read-only; check it out or clear the read-only flag first. | {file} 为只读；请先签出它或清除只读属性。 |
 | plan.noProject | No project is open. | 尚未打开项目。 |
+| plan.prebuiltUnavailable {package, version, engine} | No prebuilt {package} {version} for UE {engine}; it will be built from source. | 没有适用于 UE {engine} 的 {package} {version} 预编译版本，将从源码编译。 |
+| plan.noPrebuilt {package, version, engine} | No prebuilt {package} {version} for UE {engine}; uninstall it and install it again to build from source. | 没有适用于 UE {engine} 的 {package} {version} 预编译版本；请卸载后重新安装，改为从源码编译。 |
+| plan.noCompiler | A C++ build is needed, but Visual Studio 2022 was not found. | 需要编译 C++，但没有找到 Visual Studio 2022。 |
 | task.apply {project} | Apply Changes · {project} | 应用更改 · {project} |
 | task.recipe {recipe, project} | Apply Recipe {recipe} · {project} | 应用 Recipe {recipe} · {project} |
 | task.install {package, version} | Install {package} {version} | 安装 {package} {version} |
@@ -723,7 +914,9 @@ manager uses it for the `message` of a session problem whose `code` it does not 
 - `FUBotPackageIndex` parses **format 2** only (format 1 → clear error). From each package:
   `Version` = latest non-planned version, `AvailableVersions` (new, newest first), `bPlanned` (new),
   `Requires`/`Provides`/`ExternalRequires` (= `enginePlugins`) from the latest (or planned) version,
-  `Description` = the editor culture's text (`zh*` → `zh-CN` when present, else `en`).
+  `Description` = the editor culture's text (`zh*` → `zh-CN` when present, else `en`). A version's
+  `binaries` (§1) is for uBot Manager: UE uses the plugin found on disk however it was installed, so the
+  field is not read, not even checked.
 - `LoadConfiguredIndex`: `<Project>/Saved/uBot/index.json` (written by the manager) when it exists,
   otherwise `<UBotCore>/Index/index.json`; then `UUBotCoreSettings::AdditionalPackageIndexFiles`.
 - Descriptor `"UBot"` blocks: read `EnginePlugins`, still accept `ExternalRequires`.
@@ -794,6 +987,8 @@ ubot [--project <.uproject>] [--index <file|url>]... [--offline] [--json] <comma
   recipes
   recipe <id> [--no-build] [--yes]
   engines
+  package <Name[@ver]>... --out <dir> [--engine <id|root>] [--url-template <tpl>] [--update-index <file>]
+          [--with-symbols] [--keep-work]            builds and packs prebuilt binaries, see below
   index validate <file>       §1 validation; exit 1 on errors
   index show
 ```
@@ -809,8 +1004,12 @@ The CLI uses the same core, settings, caches and task history as the app (§6).
   still exists; with no project at all `status` says so and the commands that change a project fail with
   `plan.noProject`.
 - Every command except `index validate` and `engines` refreshes first, like the app (`sync =
-  settings.index.syncOnStart`, never with `--offline`). Read-only commands do not write
-  `<Project>/Saved/uBot/index.json`; only `apply` and `recipe` do (§1.1).
+  settings.index.syncOnStart`, never with `--offline`); `package` does so for its own host project
+  (§10.1). Read-only commands do not write `<Project>/Saved/uBot/index.json`; only `apply` and `recipe`
+  do (§1.1).
+- `status` lists where each installed package came from in its `FROM` column (`git v0.1.0`, with
+  ` (modified)` when dirty; `prebuilt UE 5.5`, the engine of its marker; `local folder`), and `info` shows
+  it as `Installed from` plus a `Prebuilt` row (`available for this project` or `-`).
 - Output is English plain text (message templates rendered with the English table), or JSON with
   `--json`: `status` the `Snapshot`, `info` `{ package, problems }`, `problems` the `Problem[]`,
   `plan` the `Plan` (so does `apply` when it stops before running anything), `apply`/`recipe` the finished
@@ -836,6 +1035,53 @@ The CLI uses the same core, settings, caches and task history as the app (§6).
 - `UBOT_MANAGER_HOME` moves settings, history and caches (§6). `UBOT_MANAGER_PERMANENT_DELETE=1` makes
   `uninstall` delete the package folder for good instead of moving it to the Recycle Bin; tests and CI set
   it (the app has no such switch).
+
+### 10.1 `ubot package`
+
+`ubot package <Name[@version]>... --out <dir>` builds the packages from source and packs them into the archives
+`binaries` points at (§1, §1.2). It needs no open project (`--project` is ignored) and does not refresh or
+touch one; `--index` and `--offline` apply, and the index sources and their caches are the user's (use
+`--index Index/index.json` for a version that is not on `main` yet).
+
+- **Engine.** `--engine` is a launcher engine id (`5.5`, found through the Epic launcher) or the root of an
+  engine that is a launcher install (registered with the launcher, or with `Engine/Build/InstalledBuild.txt`).
+  A source build is refused: binaries made with it do not load in launcher engines. Without `--engine` the
+  newest launcher engine is used. Its `Major.Minor` is the `binaries` key and part of the file names.
+- **Versions.** Each `Name` (a name listed twice is an error) is resolved in the merged index to `@version` or
+  its latest non-planned version. A planned package, an unknown package or version, and a version whose text
+  is not safe in a file name or URL (§1) are errors. The `url` of every archive is made before anything is
+  built, so a bad `--url-template` costs no build.
+- **URL template** (`--url-template`): the placeholders `{repo}` (the repository's folder name without `.git`),
+  `{ref}`, `{file}` (`<Name>-<version>-UE<Major.Minor>-Win64.zip`), `{name}`, `{version}` and `{engine}`; another
+  placeholder or an unclosed `{` is an error, and the result must pass the archive URL policy (§5.4). Default:
+  `https://github.com/AstreoX/{repo}/releases/download/{ref}/{file}`, a GitHub release asset of the version's tag.
+- **Build.** A content-only host project `<out>/_work/UBotPackaging/UBotPackaging.uproject`
+  (`EngineAssociation` = the engine id) gets `install:<Name>@<version>` for every requested package through the
+  normal plan and task path (§5), with `usePrebuilt` off, the build on, no tests and no editor reopening, and
+  settings of its own under `<out>/_work/home` (the user's settings, history and recent projects stay as
+  they are). So the packages **and their required dependencies** are cloned at their `ref`s and built with the
+  engine; the plan and the task output are printed like `apply` does. A plan with errors, or a failed task,
+  fails the command. Only the requested packages are packed; a dependency that should be installable
+  prebuilt has to be requested too.
+- **Pack.** For each requested package the descriptor's `VersionName` must equal the version, and a plugin with
+  code modules must have `Binaries/Win64/UnrealEditor-*.dll` and `UnrealEditor.modules` after the build.
+  The folder is zipped (Deflate, entries sorted) with the layout of §1.2 to
+  `<out>/<Name>-<version>-UE<Major.Minor>-Win64.zip` and `<file>.sha256` (`<sha256>  <file>`, one line);
+  `--with-symbols` keeps `*.pdb`, `*.exp` and `*.lib`. The text output then shows, per package,
+  `Packed <Name> <version>: <path> (<MB> MB, <n> files)`, `SHA-256 <hex>` and the `"binaries"` value
+  (`url` from the template, `sha256`, `size` in bytes).
+- **`--update-index <file>`** writes those entries into an index file: `binaries[<engine>]["Win64"]` of the
+  version, keeping other engines and platforms already there. The rest of the file keeps its key order and
+  formatting, a BOM and CRLF line ends; new text is indented with 4 spaces, and when the layout cannot be
+  followed the whole file is rewritten with 4-space indentation. The result is validated (§1) first: with
+  errors the file stays as it was and the command fails. It prints `Updated <file>: <n> entry|entries, 0 errors,
+  <w> warning(s).`
+- **`_work`.** It is removed at the end, also after a failure, unless `--keep-work`. It is marked with a
+  `.ubot-package-work` file, and an existing `_work` is replaced only when it carries that marker or is
+  empty; anything else is somebody else's and the command stops.
+- `--json` prints `{ packages: [{ package, version, engine, platform, file, sha256File, files, binaries }], index:
+  { file, bytes, warnings } | null }` (`index` is set with `--update-index`). Exit codes: 0, 1 on failure,
+  130 when canceled (Ctrl+C).
 
 ## 11. Frontend (`app/`)
 
@@ -863,7 +1109,11 @@ Structure:
   the design scenario: project MyRobotSim; UBotCore 0.1.0, UBotSensor 0.1.0 → 0.1.1, UBotEnvironment
   0.2.0 with the `requiresVersion` problem, UBotROS 0.1.0, UBotCombat disabled, UBotVehicles /
   UBotAerial / UBotMCP not installed, UBotLearning planned, AgentSensorCore legacy conflict, ROS
-  session problem; a running task that streams fake log lines and progress).
+  session problem; a running task that streams fake log lines and progress). The scenario's packages are
+  git checkouts except UBotCombat, which is a prebuilt install for UE 5.5, and the mock index has
+  `binaries` for UBotVehicles and UBotCombat (UE 5.5, Win64): with `install.usePrebuilt` on, installing
+  UBotVehicles plans a `download` step, and a running task simulates one with byte progress, the checks and
+  the swap in its log.
 - `src/i18n/{en,zh-CN}.json` + `t(key, params)`; `tm(msg)` renders a `Msg`. Missing zh key → en →
   the key itself. The files are two-level (section → rest of the dotted key → text, §8), `.one`/`.other`
   suffixes pick singular and plural (`tn`). The built-in index sources are shown by their `source.*`
@@ -875,13 +1125,24 @@ Structure:
   Recipe (`Welcome.dc.html`), Settings (`Settings.dc.html`). Status bar: breadcrumb, problem count
   (packages scope; errors and warnings, `info` problems are not counted), update count, pending-changes
   text with Apply… / Discard, Tasks; while a task runs the Tasks view footer shows step text, a progress
-  bar, `n/m` and a cancel button.
+  bar, `n/m` and a cancel button. For a `download` step the count is bytes, "12.3 / 45.6 MB" (MB =
+  1024 × 1024 bytes, one decimal), and "12.3 MB" with a bar that only runs, without a fill, while the
+  size is unknown; the Tasks view's summary shows the same text after a running download step.
 - Packages list: two groups, "Installed" and "uBot Index" / "uBot 索引" (a fixed title; the `name` of
   the index is not used), ordered like `Snapshot.packages`; planned packages are listed (and drawn in the
   Graph) only while `index.showPlanned` is set. The problem group of index source problems is the fixed
   string `Package Index`, shown as "Package Index" / "Package 索引" (§4).
+- Package details: the rows are Layer, Installed, Latest, Location, **Installed from** / "安装方式", Repository.
+  Installed from reads "git · <ref>", "Prebuilt · UE 5.5 · Win64" / "预编译 · UE 5.5 · Win64" (the engine and
+  platform of `PackageInfo.prebuilt`, which can differ from the project's engine) or "Local folder" /
+  "本地文件夹" (`installKind` `git`, `prebuilt`, `other`), and "—" when the package is not installed. A package
+  that is not installed and has `prebuiltAvailable` gets a muted note "Prebuilt" / "预编译" next to its Latest
+  version. An `update` to the version that is already installed (what `fix.reinstall` queues) is called a
+  reinstall: "reinstall pending" / "待重新安装" in the list, "Reinstall UBotCombat 0.1.0" / "重新安装 UBotCombat
+  0.1.0" in the pending-changes text, "Cancel reinstall" / "取消重新安装" on the button.
 - Apply Changes: the steps appear under Download / Project / Build / Finish (`download`, `project`,
-  `build`, `after`; "完成后" in Chinese; Finish holds `runTests` and `openEditor`). The options are "Reopen
+  `build`, `after`; "完成后" in Chinese; Download holds `clone`, `checkout` and `download` steps, and a plan
+  whose code all comes prebuilt has no Build; Finish holds `runTests` and `openEditor`). The options are "Reopen
   editor after build" (starts from `build.reopenEditor`) and "Save as recipe" with a name; the app always
   plans with `build: true`, and `runTests` starts from `build.runTests`, which has no checkbox here. While
   the dialog is open the app asks for the editor state every 2 s and re-plans when it changes ("Close
@@ -893,8 +1154,9 @@ Structure:
   for the project, `openSettings` opens the Settings dialog at that section.
 - Settings dialog: sections Appearance, Package Index, Installation, Build, ROS Bridge with a search box;
   OK / Cancel / Apply. Theme previews immediately and Cancel restores it; the language needs a restart;
-  built-in index sources can be reordered but not removed or disabled; "Use prebuilt binaries" is shown
-  disabled (reserved, §6). The Installation and ROS Bridge pages test git / the bridge when first opened.
+  built-in index sources can be reordered but not removed or disabled. Installation has the check box
+  "Use prebuilt binaries when available" / "有预编译版本时优先使用" (`install.usePrebuilt`, on by default, §6), saved
+  with the rest. The Installation and ROS Bridge pages test git / the bridge when first opened.
 - Tasks: a project's finished task can be rerun (its changes are planned again) while no task runs; other
   projects' tasks cannot. Projects cannot be switched while a task runs (`task.busy`).
 - Custom title bar: the header is the drag region (`data-tauri-drag-region`); minimize,
@@ -906,7 +1168,8 @@ Structure:
   `apply` → Tasks view; the snapshot refreshes when the task ends.
 - Mock-only URL parameters for screenshots: `lang=en|zh-CN`, `theme=dark|light`,
   `view=packages|graph|problems|tasks`, `dialog=recipes|plan|settings`,
-  `section=<settings section>`, `select=<package>`, `noproject=1`.
+  `section=<settings section>`, `select=<package>`, `noproject=1`, `prebuilt=0` (starts with "Use prebuilt
+  binaries" off, so installs clone and build; the default is on).
 - Scripts: `npm run dev`, `npm run build` (tsc + vite, output `app/dist`), `npm test` (vitest:
   i18n parity — every key in both files, every `msg.` code from §8 present — and formatting helpers).
 
@@ -948,7 +1211,7 @@ or within 30 s after it, is answered by that sync, so the index is fetched once.
 A second `ubot-manager.exe` exits at once after handing its `--project` (made absolute against its working
 directory) to the first instance, which opens it, publishes `ubot://snapshot`, and un-minimizes and
 focuses its window; an error is shown in a dialog. Closing the window while a task runs cancels the task
-and waits up to 10 s for it to stop its processes and remove a partial clone.
+and waits up to 10 s for it to stop its processes and remove a partial clone or the temporary files of a download.
 
 ## 13. Verification
 
@@ -961,15 +1224,26 @@ and waits up to 10 s for it to stop its processes and remove a partial clone.
 - Index: `node scripts/sync-index.mjs --check` fails when the embedded copy differs from uBotCore's
   `Index/index.json`; `node scripts/sync-index.mjs` refreshes it. `real_index.rs` validates both copies
   and checks them against `index.schema.json` (`UBOTCORE_DIR` or the workspace layout; skipped without
-  uBotCore).
+  uBotCore), including which `binaries` shapes the schema and `ubot index validate` accept and refuse.
 - CLI end-to-end (temp dirs only; `UBOT_PLUGINS_DIR` or the workspace layout, skipped without the
   repositories or git): local bare repos with tags built from the real uBotCore / uBotSensor / uBotROS
   working trees, a local index pointing at them, a temp copy of a content-only project;
   `ubot apply install:UBotROS --no-build --yes` clones 3 packages and enables them; update, disable
   (dependents), uninstall (permanent delete instead of the Recycle Bin), problems, `.uproject`
   formatting preserved.
+- Prebuilt binaries (temp dirs only, no real UBT, no network): `crates/ubot-core/tests/prebuilt.rs` installs
+  from archives packed out of a built plugin folder through the `Manager`, with a fake launcher engine whose
+  `Build.bat` fails (a prebuilt install must never build), and checks the marker, the replacement of an
+  installed folder, the engine mismatch problem and its reinstall fix; the unit tests of `prebuilt.rs`,
+  `download.rs` (a loopback HTTP server: redirects, limits, cancel) and `exec.rs` cover archive extraction
+  (zip slip and the other refusals of §5.3), the SHA-256 and size checks, cleanup after failure or cancel and
+  the swap. `crates/ubot-cli/tests/package.rs` runs `ubot package` end to end with a fake launcher engine (a
+  `Build.bat` that "builds" every plugin of the host project), small local git repositories, a local index,
+  and `--update-index` on a temporary copy of uBotCore's real index; it needs git and Windows.
 - Frontend: `npm test`, `npm run build`, and screenshots of every view and dialog in both languages and
-  both themes (`vite preview` with the mock URL parameters of §11), compared with the design.
+  both themes (`vite preview` with the mock URL parameters of §11), compared with the design. The default
+  mock scenario shows the prebuilt installs (a download step in Apply Changes and Tasks); `prebuilt=0` shows
+  the clone-and-build ones.
 - UE: build the host project (`Build.bat <Host>Editor Win64 Development -Project=<host .uproject>
   -WaitMutex -NoHotReloadFromIDE`), run `Automation RunTests UBot` headless, and check the panel
   (`uBot.OpenPanel`) in both editor languages.

@@ -72,6 +72,9 @@ pub struct ManagerOptions {
     pub remover: Arc<dyn Remover>,
     pub fetcher: Arc<dyn Fetcher>,
     pub engine_registry: Arc<dyn EngineRegistry + Send + Sync>,
+    /// Whether a C++ compiler (Visual Studio 2022) is installed; a plan with a build step warns
+    /// `plan.noCompiler` without one.
+    pub compiler_found: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl Default for ManagerOptions {
@@ -84,6 +87,7 @@ impl Default for ManagerOptions {
             remover: Arc::new(RecycleBin),
             fetcher: Arc::new(HttpFetcher),
             engine_registry: Arc::new(SystemEngineRegistry),
+            compiler_found: Arc::new(env::vs2022_found),
         }
     }
 }
@@ -303,7 +307,7 @@ impl Manager {
     /// `plan`: plans `changes` against a fresh scan of the project (no network).
     pub fn plan(&self, changes: &[Change], options: &ApplyOptions) -> ApiResult<Plan> {
         let workspace = self.light_rebuild()?;
-        Ok(plan::plan(&workspace, changes, options).plan)
+        Ok(self.prepare(&workspace, changes, options).plan)
     }
 
     /// `apply`: re-plans and starts the task; returns its id. Fails when another task runs or the
@@ -321,7 +325,7 @@ impl Manager {
             return Err(render_en(&msg0("task.busy")));
         }
         let workspace = self.light_rebuild()?;
-        let prepared = plan::plan(&workspace, changes, options);
+        let prepared = self.prepare(&workspace, changes, options);
         if !prepared.plan.errors.is_empty() {
             return Err(prepared
                 .plan
@@ -370,6 +374,16 @@ impl Manager {
         threads.retain(|_, thread| !thread.is_finished());
         threads.insert(id.clone(), handle.thread);
         Ok(id)
+    }
+
+    fn prepare(
+        &self,
+        workspace: &Workspace,
+        changes: &[Change],
+        options: &ApplyOptions,
+    ) -> plan::PreparedPlan {
+        let compiler_found = self.inner.options.compiler_found.clone();
+        plan::plan_with(workspace, changes, options, &move || compiler_found())
     }
 
     fn task_finished(
@@ -779,12 +793,13 @@ impl Manager {
         };
         let index = MergedIndex::merge(&loaded.indexes);
 
-        // Saved/uBot/index.json is for the UE panel, which clones with these URLs: credentials
-        // in them are kept (everything shown or logged redacts them).
+        // Saved/uBot/index.json is for the UE panel, which clones with the repository URLs:
+        // credentials in them are kept (everything shown or logged redacts them). `binaries`
+        // URLs are redacted, because UE ignores them and the file lives in the project folder.
         if options.write_merged_index {
             if let Some(context) = &context {
                 let path = context.project.merged_index_file();
-                let text = index.to_file().to_json();
+                let text = index.to_file().for_panel().to_json();
                 let current = paths::read_text(&path).ok().map(|(text, _)| text);
                 if current.as_deref() != Some(text.as_str()) {
                     let _ = paths::write_atomic(&path, text.as_bytes());

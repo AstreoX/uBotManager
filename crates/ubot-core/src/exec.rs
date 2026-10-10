@@ -13,16 +13,21 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::descriptor;
+use crate::download;
 use crate::git;
+use crate::index::is_plugin_name;
 use crate::model::{Msg, Progress, Snapshot, StepStatus, Task, TaskStep};
 use crate::msg::{msg, msg0, render_en};
 use crate::paths;
 use crate::plan::{PreparedPlan, StepAction, PLATFORM};
+use crate::prebuilt::{self, InstallMarker, Stop};
 use crate::process::{self, RunOutcome, StreamEvent};
 use crate::project::Project;
 use crate::sources::now_rfc3339;
 use crate::uproject;
-use crate::url::redact_credentials;
+use crate::url::{display_download_source, redact_credentials, strip_url_secrets};
+use crate::version::SemVer;
 
 pub const MAX_TASKS: usize = 30;
 pub const MAX_STEP_LOG_LINES: usize = 5000;
@@ -86,6 +91,27 @@ pub fn remove_dir_robust(dir: &Path) -> io::Result<()> {
         }
     }
     Err(last_error.unwrap_or_else(|| io::Error::other("could not remove the directory")))
+}
+
+/// Renames, retrying briefly: a virus scanner looks at freshly extracted binaries and holds them
+/// open for a moment.
+fn rename_robust(from: &Path, to: &Path) -> io::Result<()> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(200));
+        }
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("could not rename")))
+}
+
+/// "12.3 MB".
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 fn clear_readonly(path: &Path) {
@@ -389,6 +415,17 @@ impl<'a> StepLog<'a> {
         }
     }
 
+    /// Byte progress of a download (`total` 0 when the size is not known).
+    fn set_progress(&mut self, done: u64, total: Option<u64>) {
+        let clamp = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+        self.progress = Some(Progress {
+            done: clamp(done),
+            total: clamp(total.unwrap_or(0)),
+        });
+        self.progress_changed = true;
+        self.flush_if_due();
+    }
+
     /// Forwards buffered output once the flush interval has passed, so quiet stretches of a
     /// process do not hold lines back.
     fn flush_if_due(&mut self) {
@@ -614,6 +651,27 @@ impl Runner {
                 dest,
             } => self.clone_package(package, url, git_ref, dest, log),
             StepAction::Checkout { dir, git_ref, .. } => self.checkout_package(dir, git_ref, log),
+            StepAction::Download {
+                package,
+                version,
+                url,
+                sha256,
+                size,
+                engine,
+                dest,
+                ..
+            } => self.download_package(
+                &DownloadSpec {
+                    package,
+                    version,
+                    url,
+                    sha256,
+                    size: *size,
+                    engine,
+                    dest,
+                },
+                log,
+            ),
             StepAction::SetEnabled { plugin, enabled } => {
                 let path = &self.prepared.project_path;
                 match uproject::edit(path, |project| project.set_enabled(plugin, *enabled)) {
@@ -756,6 +814,241 @@ impl Runner {
                 }
             }
         }
+    }
+
+    /// Installs prebuilt binaries (SPEC §5.3 `download`): fetches the archive next to the
+    /// destination, checks its SHA-256, extracts it, checks the descriptor, writes the install
+    /// marker and only then swaps the new folder in; the previous one goes to the Recycle Bin.
+    /// Whatever the step created is removed after a failure or cancel, and the installed folder
+    /// is not touched before the swap.
+    fn download_package(&self, spec: &DownloadSpec<'_>, log: &mut StepLog<'_>) -> StepResult {
+        let (Some(install_dir), Some(_)) = (spec.dest.parent(), spec.dest.file_name()) else {
+            return StepResult::Failed(format!("{} is not a package folder", spec.dest.display()));
+        };
+        // The name becomes part of the temporary file names.
+        if !is_plugin_name(spec.package) {
+            return StepResult::Failed(format!("'{}' is not a plugin name", spec.package));
+        }
+        let roots = match Project::open(&self.prepared.project_path) {
+            Ok(project) => project.plugin_roots,
+            Err(_) => Vec::new(),
+        };
+        if roots.iter().any(|root| paths::same_path(root, spec.dest)) {
+            return StepResult::Failed(format!(
+                "{} is a plugin folder that holds more than {}",
+                spec.dest.display(),
+                spec.package
+            ));
+        }
+        if let Err(error) = fs::create_dir_all(install_dir) {
+            return StepResult::Failed(format!(
+                "could not create {}: {error}",
+                install_dir.display()
+            ));
+        }
+        let part = install_dir.join(format!(".ubot-download-{}.zip.part", spec.package));
+        let extract = install_dir.join(format!(".ubot-extract-{}", spec.package));
+        let aside = install_dir.join(format!(".ubot-old-{}", spec.package));
+        if aside.exists() {
+            return StepResult::Failed(format!(
+                "{} is left over from an earlier update; move it away first",
+                aside.display()
+            ));
+        }
+        // Leftovers of an interrupted run of this step.
+        let _ = fs::remove_file(&part);
+        let _ = remove_dir_robust(&extract);
+
+        let result = self.download_into(spec, &part, &extract, &aside, log);
+
+        let mut cleanup_errors = Vec::new();
+        if part.exists() {
+            if let Err(error) = fs::remove_file(&part) {
+                cleanup_errors.push(format!("{}: {error}", part.display()));
+            }
+        }
+        if extract.exists() {
+            if let Err(error) = remove_dir_robust(&extract) {
+                cleanup_errors.push(format!("{}: {error}", extract.display()));
+            }
+        }
+        if !matches!(result, StepResult::Done) {
+            log.line("Removed the temporary files of the download.");
+        }
+        for error in cleanup_errors {
+            log.line(format!("Could not remove {error}"));
+        }
+        result
+    }
+
+    fn download_into(
+        &self,
+        spec: &DownloadSpec<'_>,
+        part: &Path,
+        extract: &Path,
+        aside: &Path,
+        log: &mut StepLog<'_>,
+    ) -> StepResult {
+        let source = display_download_source(spec.url);
+        let verb = if download::local_path(spec.url).is_some() {
+            "Copying"
+        } else {
+            "Downloading"
+        };
+        match spec.size {
+            Some(size) => log.line(format!("{verb} {source} ({})", megabytes(size))),
+            None => log.line(format!("{verb} {source}")),
+        }
+        let fetched = match download::fetch(
+            spec.url,
+            part,
+            spec.size,
+            &self.cancel,
+            &mut |done, total| log.set_progress(done, total),
+        ) {
+            Ok(fetched) => fetched,
+            Err(Stop::Canceled) => return StepResult::Canceled,
+            Err(Stop::Failed(error)) => return StepResult::Failed(error),
+        };
+        log.line(format!(
+            "Received {} ({} bytes)",
+            megabytes(fetched.bytes),
+            fetched.bytes
+        ));
+        if !fetched.sha256.eq_ignore_ascii_case(spec.sha256) {
+            return StepResult::Failed(format!(
+                "SHA-256 mismatch: the index lists {}, the download is {}",
+                spec.sha256, fetched.sha256
+            ));
+        }
+        log.line(format!("SHA-256 {} verified", fetched.sha256));
+
+        let top = match prebuilt::extract_package(part, spec.package, extract, &self.cancel) {
+            Ok(top) => top,
+            Err(Stop::Canceled) => return StepResult::Canceled,
+            Err(Stop::Failed(error)) => return StepResult::Failed(error),
+        };
+        let _ = fs::remove_file(part);
+        let Some(descriptor_path) = prebuilt::find_descriptor(&top, spec.package) else {
+            return StepResult::Failed(format!(
+                "the archive has no {}.uplugin in its folder",
+                spec.package
+            ));
+        };
+        let parsed = paths::read_text(&descriptor_path)
+            .ok()
+            .and_then(|(text, _)| descriptor::parse(&text).ok());
+        let has_modules = parsed
+            .as_ref()
+            .is_some_and(|descriptor| descriptor.has_modules);
+        let found = parsed.and_then(|descriptor| descriptor.version_name);
+        let wanted = SemVer::parse(spec.version);
+        match found {
+            Some(found) if wanted.is_some() && SemVer::parse(&found) == wanted => {}
+            Some(found) => {
+                return StepResult::Failed(format!(
+                    "the archive holds {} {found}, not {}",
+                    spec.package, spec.version
+                ))
+            }
+            None => {
+                return StepResult::Failed(format!(
+                    "the descriptor in the archive has no VersionName (expected {})",
+                    spec.version
+                ))
+            }
+        }
+        // The planner takes a prebuilt install as built, so an archive of a plugin with code must
+        // really hold the editor binaries; a source-only archive would never get compiled.
+        if has_modules {
+            if !prebuilt::has_editor_binaries(&top) {
+                return StepResult::Failed(format!(
+                    "the archive has no Binaries/{PLATFORM}/UnrealEditor-*.dll for {}; it is not a prebuilt package",
+                    spec.package
+                ));
+            }
+            if !top
+                .join("Binaries")
+                .join(PLATFORM)
+                .join("UnrealEditor.modules")
+                .is_file()
+            {
+                return StepResult::Failed(format!(
+                    "the archive has no Binaries/{PLATFORM}/UnrealEditor.modules for {}",
+                    spec.package
+                ));
+            }
+        }
+        log.line(format!("Extracted {} {}", spec.package, spec.version));
+
+        // The marker is the manager's own record, never taken from the archive.
+        let marker = InstallMarker {
+            kind: prebuilt::MARKER_KIND.into(),
+            package: spec.package.to_string(),
+            version: spec.version.to_string(),
+            engine: spec.engine.to_string(),
+            platform: PLATFORM.into(),
+            url: strip_url_secrets(spec.url),
+            sha256: fetched.sha256.clone(),
+            installed_at: now_rfc3339(),
+        };
+        if let Err(error) = marker.write(&top) {
+            return StepResult::Failed(format!("could not write the install marker: {error}"));
+        }
+        if self.canceled() {
+            return StepResult::Canceled;
+        }
+
+        // The swap: the current folder moves aside, the new one takes its place, and only then
+        // does the old one go to the Recycle Bin. Any failure puts the old one back.
+        let dest = spec.dest;
+        let had_old = dest.exists();
+        if had_old {
+            if let Err(error) = rename_robust(dest, aside) {
+                return StepResult::Failed(format!(
+                    "could not move the installed {} aside: {error}",
+                    spec.package
+                ));
+            }
+        }
+        if let Err(error) = rename_robust(&top, dest) {
+            if had_old {
+                let _ = rename_robust(aside, dest);
+            }
+            return StepResult::Failed(format!(
+                "could not move the new {} into {}: {error}",
+                spec.package,
+                dest.display()
+            ));
+        }
+        if had_old {
+            if let Err(error) = self.context.remover.remove(aside) {
+                let restored = rename_robust(dest, &top).and_then(|()| rename_robust(aside, dest));
+                return StepResult::Failed(match restored {
+                    Ok(()) => format!(
+                        "could not remove the previous {}: {error}; the previous version was kept",
+                        spec.package
+                    ),
+                    Err(restore_error) => format!(
+                        "could not remove the previous {}: {error}; it is in {} ({restore_error})",
+                        spec.package,
+                        aside.display()
+                    ),
+                });
+            }
+            log.line(format!(
+                "Removed the previous {} (Recycle Bin)",
+                spec.package
+            ));
+        }
+        log.line(format!(
+            "Installed {} {} (prebuilt for UE {} {PLATFORM}) in {}",
+            spec.package,
+            spec.version,
+            spec.engine,
+            paths::display(dest)
+        ));
+        StepResult::Done
     }
 
     fn run_build(
@@ -918,6 +1211,17 @@ impl Runner {
         }
         result
     }
+}
+
+/// What a `download` step installs.
+struct DownloadSpec<'a> {
+    package: &'a str,
+    version: &'a str,
+    url: &'a str,
+    sha256: &'a str,
+    size: Option<u64>,
+    engine: &'a str,
+    dest: &'a Path,
 }
 
 fn has_descriptor(dir: &Path, package: &str) -> bool {
@@ -1938,6 +2242,529 @@ mod tests {
         for bad in ["", "a b", "a&b", "a|b", "a^b", "a(b)", "a%b", "a\"b", "a;b"] {
             assert!(!is_safe_build_name(bad), "{bad:?}");
         }
+    }
+
+    /// A package archive of UBotSensor at `version`.
+    fn sensor_zip(version: &str) -> Vec<u8> {
+        let descriptor =
+            format!(r#"{{ "VersionName": "{version}", "UBot": {{ "Layer": "Capability" }} }}"#);
+        crate::prebuilt::tests::zip_bytes(&[
+            ("UBotSensor/", None),
+            ("UBotSensor/UBotSensor.uplugin", Some(descriptor.as_bytes())),
+            (
+                "UBotSensor/Binaries/Win64/UnrealEditor-UBotSensor.dll",
+                Some(b"dll"),
+            ),
+            (
+                "UBotSensor/Binaries/Win64/UnrealEditor.modules",
+                Some(b"{}"),
+            ),
+        ])
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        crate::prebuilt::hex(&sha2::Sha256::digest(bytes))
+    }
+
+    struct DownloadFixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        project: PathBuf,
+        dest: PathBuf,
+    }
+
+    impl DownloadFixture {
+        fn new() -> DownloadFixture {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let project = root.join("P.uproject");
+            fs::write(&project, "{}").unwrap();
+            let dest = root.join("Plugins").join("uBot").join("uBotSensor");
+            DownloadFixture {
+                _dir: dir,
+                root,
+                project,
+                dest,
+            }
+        }
+
+        fn plan(&self, url: &str, sha256: &str, size: Option<u64>) -> PreparedPlan {
+            let replace = self.dest.exists();
+            let mut plan = prepared(
+                &self.project,
+                vec![(
+                    StepKind::Download,
+                    StepAction::Download {
+                        package: "UBotSensor".into(),
+                        version: "0.1.0".into(),
+                        url: url.into(),
+                        sha256: sha256.into(),
+                        size,
+                        engine: "5.5".into(),
+                        dest: self.dest.clone(),
+                        replace,
+                    },
+                )],
+            );
+            plan.plan.steps[0].needs_editor_closed = replace;
+            plan
+        }
+
+        /// Everything in the install folder: only the package folder may be there.
+        fn install_dir_entries(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.dest.parent().unwrap())
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+
+        fn write_zip(&self, bytes: &[u8]) -> PathBuf {
+            let path = self
+                .root
+                .join("mirror")
+                .join("UBotSensor-0.1.0-UE5.5-Win64.zip");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    #[test]
+    fn download_installs_from_a_local_file_and_writes_the_marker() {
+        let fixture = DownloadFixture::new();
+        let bytes = sensor_zip("0.1.0");
+        let zip = fixture.write_zip(&bytes);
+        for url in [
+            zip.to_string_lossy().into_owned(),
+            reqwest::Url::from_file_path(&zip).unwrap().to_string(),
+        ] {
+            let _ = remove_dir_robust(&fixture.dest);
+            let sink = Arc::new(RecordingSink::default());
+            let (task, store) = run_to_end(
+                fixture.plan(&url, &sha(&bytes), Some(bytes.len() as u64)),
+                context(Arc::new(|_| false), true),
+                sink.clone(),
+            );
+            assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+            assert!(fixture.dest.join("UBotSensor.uplugin").is_file());
+            assert!(crate::prebuilt::has_editor_binaries(&fixture.dest));
+            assert_eq!(
+                fixture.install_dir_entries(),
+                ["uBotSensor"],
+                "no temporary files"
+            );
+
+            let marker = InstallMarker::read(&fixture.dest, "UBotSensor").expect("a valid marker");
+            assert_eq!(marker.kind, "prebuilt");
+            assert_eq!(marker.package, "UBotSensor");
+            assert_eq!(marker.version, "0.1.0");
+            assert_eq!(marker.engine, "5.5");
+            assert_eq!(marker.platform, "Win64");
+            assert_eq!(marker.url, url);
+            assert_eq!(marker.sha256, sha(&bytes));
+            assert!(chrono::DateTime::parse_from_rfc3339(&marker.installed_at).is_ok());
+
+            let log = store.lock().unwrap().log(&task.id, Some("s1")).unwrap();
+            assert!(log[0].starts_with("Copying "), "{log:?}");
+            assert!(
+                log.iter()
+                    .any(|line| line == &format!("SHA-256 {} verified", sha(&bytes))),
+                "{log:?}"
+            );
+            assert!(
+                log.last()
+                    .unwrap()
+                    .starts_with("Installed UBotSensor 0.1.0 (prebuilt for UE 5.5 Win64) in "),
+                "{log:?}"
+            );
+            let total = bytes.len() as u32;
+            assert_eq!(
+                task.steps[0].progress,
+                Some(Progress { done: total, total }),
+                "byte progress"
+            );
+        }
+    }
+
+    #[test]
+    fn download_over_http_follows_a_redirect_and_checks_the_sha() {
+        use std::io::Write as _;
+        let fixture = DownloadFixture::new();
+        let bytes = sensor_zip("0.1.0");
+        let served = bytes.clone();
+        let base = crate::download::tests::serve(move |path, stream| {
+            match path.split('?').next().unwrap_or_default() {
+                "/UBotSensor-0.1.0-UE5.5-Win64.zip" => {
+                    crate::download::tests::ok_body(stream, &served)
+                }
+                _ => {
+                    let _ = write!(
+                    stream,
+                    "HTTP/1.1 302 Found\r\nLocation: /UBotSensor-0.1.0-UE5.5-Win64.zip?token=SECRET\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                }
+            }
+        });
+        let url = format!("{base}/releases/latest");
+        let (task, store) = run_to_end(
+            fixture.plan(&url, &sha(&bytes), None),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+        let log = store.lock().unwrap().log(&task.id, Some("s1")).unwrap();
+        assert!(
+            log[0].starts_with("Downloading 127.0.0.1:"),
+            "host and file only: {log:?}"
+        );
+        assert!(!log.iter().any(|line| line.contains("SECRET")), "{log:?}");
+        assert!(fixture.dest.join("UBotSensor.uplugin").is_file());
+
+        // A wrong SHA-256 fails and leaves nothing behind.
+        remove_dir_robust(&fixture.dest).unwrap();
+        let (task, _) = run_to_end(
+            fixture.plan(&url, &"0".repeat(64), Some(bytes.len() as u64)),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Failed);
+        assert!(
+            task.error.as_deref().unwrap().contains("SHA-256 mismatch"),
+            "{:?}",
+            task.error
+        );
+        assert!(!fixture.dest.exists());
+        assert!(
+            fixture.install_dir_entries().is_empty(),
+            "{:?}",
+            fixture.install_dir_entries()
+        );
+    }
+
+    #[test]
+    fn bad_archives_fail_and_leave_nothing_behind() {
+        let fixture = DownloadFixture::new();
+        let slip = crate::prebuilt::tests::zip_bytes(&[
+            (
+                "UBotSensor/UBotSensor.uplugin",
+                Some(b"{ \"VersionName\": \"0.1.0\" }"),
+            ),
+            ("UBotSensor/../../../evil.txt", Some(b"x")),
+        ]);
+        let two_roots = crate::prebuilt::tests::zip_bytes(&[
+            (
+                "UBotSensor/UBotSensor.uplugin",
+                Some(b"{ \"VersionName\": \"0.1.0\" }"),
+            ),
+            ("Extra/readme.txt", Some(b"x")),
+        ]);
+        let old_version = sensor_zip("0.0.9");
+        let no_descriptor =
+            crate::prebuilt::tests::zip_bytes(&[("UBotSensor/readme.txt", Some(b"x"))]);
+        let good = sensor_zip("0.1.0");
+        // Git data would make the package a git checkout; the marker is the manager's own.
+        let with_git = crate::prebuilt::tests::zip_bytes(&[
+            (
+                "UBotSensor/UBotSensor.uplugin",
+                Some(b"{ \"VersionName\": \"0.1.0\" }"),
+            ),
+            ("UBotSensor/.git/HEAD", Some(b"ref: refs/heads/main")),
+            ("UBotSensor/.git/config", Some(b"[core]")),
+        ]);
+        let with_marker = crate::prebuilt::tests::zip_bytes(&[
+            (
+                "UBotSensor/UBotSensor.uplugin",
+                Some(b"{ \"VersionName\": \"0.1.0\" }"),
+            ),
+            ("UBotSensor/.ubot-install.json", Some(b"{}")),
+        ]);
+        let cases: Vec<(Vec<u8>, Option<u64>, &str)> = vec![
+            (slip, None, "leaves the folder"),
+            (with_git, None, "inside a .git folder"),
+            (with_marker, None, "reserved for the manager"),
+            (two_roots, None, "more than one top-level folder"),
+            (old_version, None, "holds UBotSensor 0.0.9, not 0.1.0"),
+            (no_descriptor, None, "no UBotSensor.uplugin"),
+            (good.clone(), Some(good.len() as u64 - 1), "the index lists"),
+            (good.clone(), Some(good.len() as u64 + 1), "the index lists"),
+        ];
+        for (bytes, size, fragment) in cases {
+            let zip = fixture.write_zip(&bytes);
+            let (task, _) = run_to_end(
+                fixture.plan(&zip.to_string_lossy(), &sha(&bytes), size),
+                context(Arc::new(|_| false), true),
+                Arc::new(RecordingSink::default()),
+            );
+            assert_eq!(task.status, StepStatus::Failed, "{fragment}");
+            let error = task.error.as_deref().unwrap();
+            assert!(error.contains(fragment), "{fragment}: {error}");
+            assert!(!fixture.dest.exists(), "{fragment}");
+            assert!(
+                fixture.install_dir_entries().is_empty(),
+                "{fragment}: {:?}",
+                fixture.install_dir_entries()
+            );
+            assert!(!fixture.root.join("evil.txt").exists());
+            assert!(!fixture.root.join("Plugins").join("evil.txt").exists());
+        }
+    }
+
+    /// An archive of UBotSensor whose descriptor declares a code module, with the given extra files.
+    fn sensor_zip_with_code(extra: &[(&str, Option<&[u8]>)]) -> Vec<u8> {
+        let mut entries: Vec<(&str, Option<&[u8]>)> = vec![(
+            "UBotSensor/UBotSensor.uplugin",
+            Some(
+                br#"{ "VersionName": "0.1.0", "Modules": [ { "Name": "UBotSensor", "Type": "Runtime" } ], "UBot": { "Layer": "Capability" } }"#,
+            ),
+        )];
+        entries.extend_from_slice(extra);
+        crate::prebuilt::tests::zip_bytes(&entries)
+    }
+
+    #[test]
+    fn a_package_with_code_must_ship_its_binaries() {
+        let fixture = DownloadFixture::new();
+        let source_only =
+            sensor_zip_with_code(&[("UBotSensor/Source/UBotSensor/X.cpp", Some(b"//"))]);
+        let no_modules_file = sensor_zip_with_code(&[(
+            "UBotSensor/Binaries/Win64/UnrealEditor-UBotSensor.dll",
+            Some(b"dll"),
+        )]);
+        let complete = sensor_zip_with_code(&[
+            (
+                "UBotSensor/Binaries/Win64/UnrealEditor-UBotSensor.dll",
+                Some(b"dll"),
+            ),
+            (
+                "UBotSensor/Binaries/Win64/UnrealEditor.modules",
+                Some(b"{}"),
+            ),
+        ]);
+        // An installation that is there stays as it is while the archive is refused.
+        fs::create_dir_all(&fixture.dest).unwrap();
+        fs::write(fixture.dest.join("old.txt"), "keep me").unwrap();
+        for (bytes, fragment) in [
+            (&source_only, "no Binaries/Win64/UnrealEditor-*.dll"),
+            (&no_modules_file, "no Binaries/Win64/UnrealEditor.modules"),
+        ] {
+            let zip = fixture.write_zip(bytes);
+            let (task, _) = run_to_end(
+                fixture.plan(&zip.to_string_lossy(), &sha(bytes), None),
+                context(Arc::new(|_| false), true),
+                Arc::new(RecordingSink::default()),
+            );
+            assert_eq!(task.status, StepStatus::Failed, "{fragment}");
+            let error = task.error.as_deref().unwrap();
+            assert!(error.contains(fragment), "{fragment}: {error}");
+            assert_eq!(
+                fs::read_to_string(fixture.dest.join("old.txt")).unwrap(),
+                "keep me",
+                "{fragment}: the installed copy is untouched"
+            );
+            assert!(InstallMarker::read(&fixture.dest, "UBotSensor").is_none());
+            assert_eq!(
+                fixture.install_dir_entries(),
+                ["uBotSensor"],
+                "{fragment}: no temporary files"
+            );
+        }
+
+        // The same descriptor with its binaries installs, as a prebuilt package.
+        let zip = fixture.write_zip(&complete);
+        let (task, _) = run_to_end(
+            fixture.plan(&zip.to_string_lossy(), &sha(&complete), None),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+        assert!(crate::prebuilt::has_editor_binaries(&fixture.dest));
+        assert!(!fixture.dest.join("old.txt").exists());
+    }
+
+    #[test]
+    fn the_install_marker_keeps_no_credentials_or_query_tokens() {
+        let fixture = DownloadFixture::new();
+        let bytes = sensor_zip("0.1.0");
+        let zip = fixture.write_zip(&bytes);
+        let signed = format!(
+            "{}?sig=SECRETSIG&x=1#SECRETFRAG",
+            reqwest::Url::from_file_path(&zip).unwrap()
+        );
+        let (task, _) = run_to_end(
+            fixture.plan(&signed, &sha(&bytes), None),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+        let text = fs::read_to_string(fixture.dest.join(".ubot-install.json")).unwrap();
+        assert!(
+            !text.contains("SECRETSIG") && !text.contains("SECRETFRAG"),
+            "{text}"
+        );
+        let marker = InstallMarker::read(&fixture.dest, "UBotSensor").expect("a valid marker");
+        assert_eq!(
+            marker.url,
+            reqwest::Url::from_file_path(&zip).unwrap().to_string()
+        );
+
+        // A web URL loses its user info as well.
+        let served = bytes.clone();
+        let base = crate::download::tests::serve(move |_path, stream| {
+            crate::download::tests::ok_body(stream, &served)
+        });
+        let url = base.replacen("http://", "http://user:SECRETPW@", 1) + "/x.zip?token=SECRETTOKEN";
+        remove_dir_robust(&fixture.dest).unwrap();
+        let (task, store) = run_to_end(
+            fixture.plan(&url, &sha(&bytes), None),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+        let text = fs::read_to_string(fixture.dest.join(".ubot-install.json")).unwrap();
+        for secret in ["SECRETPW", "SECRETTOKEN"] {
+            assert!(!text.contains(secret), "{text}");
+            let log = store.lock().unwrap().log(&task.id, Some("s1")).unwrap();
+            assert!(!log.iter().any(|line| line.contains(secret)), "{log:?}");
+        }
+        assert!(text.contains("http://***@127.0.0.1:"), "{text}");
+    }
+
+    struct FailingRemover;
+
+    impl Remover for FailingRemover {
+        fn remove(&self, _dir: &Path) -> Result<(), String> {
+            Err("the Recycle Bin is not available".into())
+        }
+    }
+
+    #[test]
+    fn replacing_an_install_keeps_the_old_one_when_the_swap_fails() {
+        let fixture = DownloadFixture::new();
+        fs::create_dir_all(&fixture.dest).unwrap();
+        let old_descriptor = r#"{ "VersionName": "0.0.1", "UBot": { "Layer": "Capability" } }"#;
+        fs::write(fixture.dest.join("UBotSensor.uplugin"), old_descriptor).unwrap();
+        fs::write(fixture.dest.join("old.txt"), "mine").unwrap();
+        let bytes = sensor_zip("0.1.0");
+        let zip = fixture.write_zip(&bytes);
+        let plan = || fixture.plan(&zip.to_string_lossy(), &sha(&bytes), None);
+
+        let mut failing = context(Arc::new(|_| false), true);
+        failing.remover = Arc::new(FailingRemover);
+        let (task, _) = run_to_end(plan(), failing, Arc::new(RecordingSink::default()));
+        assert_eq!(task.status, StepStatus::Failed);
+        assert!(
+            task.error
+                .as_deref()
+                .unwrap()
+                .contains("the previous version was kept"),
+            "{:?}",
+            task.error
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.dest.join("UBotSensor.uplugin")).unwrap(),
+            old_descriptor
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.dest.join("old.txt")).unwrap(),
+            "mine"
+        );
+        assert!(InstallMarker::read(&fixture.dest, "UBotSensor").is_none());
+        assert_eq!(fixture.install_dir_entries(), ["uBotSensor"]);
+
+        // A folder left over from an interrupted update is not overwritten.
+        let aside = fixture.dest.parent().unwrap().join(".ubot-old-UBotSensor");
+        fs::create_dir_all(&aside).unwrap();
+        let (task, _) = run_to_end(
+            plan(),
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(task.status, StepStatus::Failed);
+        assert!(task.error.as_deref().unwrap().contains("left over"));
+        fs::remove_dir(&aside).unwrap();
+
+        // With a working Recycle Bin the old folder goes there.
+        let remover = Arc::new(CountingRemover::default());
+        let mut working = context(Arc::new(|_| false), true);
+        working.remover = remover.clone();
+        let (task, store) = run_to_end(plan(), working, Arc::new(RecordingSink::default()));
+        assert_eq!(task.status, StepStatus::Done, "{:?}", task.error);
+        assert_eq!(remover.0.load(Ordering::SeqCst), 1);
+        assert!(!fixture.dest.join("old.txt").exists());
+        assert_eq!(
+            InstallMarker::read(&fixture.dest, "UBotSensor")
+                .unwrap()
+                .version,
+            "0.1.0"
+        );
+        assert_eq!(fixture.install_dir_entries(), ["uBotSensor"]);
+        let log = store.lock().unwrap().log(&task.id, Some("s1")).unwrap();
+        assert!(
+            log.iter()
+                .any(|line| line == "Removed the previous UBotSensor (Recycle Bin)"),
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn a_canceled_download_removes_what_it_wrote() {
+        use std::io::Write as _;
+        let fixture = DownloadFixture::new();
+        let base = crate::download::tests::serve(|_, stream| {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(&[7u8; 30_000]);
+            let _ = stream.flush();
+            thread::sleep(Duration::from_secs(5));
+        });
+        let plan = fixture.plan(&format!("{base}/x.zip"), &"0".repeat(64), None);
+        let store = Arc::new(Mutex::new(TaskStore::in_memory()));
+        let record = new_task(new_task_id(), msg("task.apply", &[("project", "P")]), &plan);
+        let handle = start(
+            store.clone(),
+            record,
+            plan,
+            context(Arc::new(|_| false), true),
+            Arc::new(RecordingSink::default()),
+            Box::new(|_| {}),
+        );
+        // Wait until part of the body has arrived.
+        let part = fixture
+            .dest
+            .parent()
+            .unwrap()
+            .join(".ubot-download-UBotSensor.zip.part");
+        let started = Instant::now();
+        while !(part.exists() && fs::metadata(&part).map(|m| m.len()).unwrap_or(0) > 0)
+            && started.elapsed() < Duration::from_secs(4)
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(part.exists(), "the download started");
+        handle.cancel.store(true, Ordering::SeqCst);
+        handle.thread.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "canceled at once"
+        );
+        let task = store.lock().unwrap().get(&handle.id).unwrap().task.clone();
+        assert_eq!(task.status, StepStatus::Canceled);
+        assert!(!part.exists());
+        assert!(!fixture.dest.exists());
+        assert!(
+            fixture.install_dir_entries().is_empty(),
+            "{:?}",
+            fixture.install_dir_entries()
+        );
     }
 
     #[test]

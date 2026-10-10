@@ -4,19 +4,19 @@ uBot 家族的 Package 管理器：一个 Windows 桌面程序，在 UE 5.5 工�
 
 ## 简介
 
-uBot Package 就是 `.uplugin` 带有顶层 `"UBot"` 对象的 UE 插件，格式见 [uBotCore](https://github.com/AstreoX/uBotCore) 的 README。uBot Manager 用 git 管理它们：
+uBot Package 就是 `.uplugin` 带有顶层 `"UBot"` 对象的 UE 插件，格式见 [uBotCore](https://github.com/AstreoX/uBotCore) 的 README。uBot Manager 用预编译包或 git 管理它们：
 
 | 操作 | 做了什么 |
 | --- | --- |
-| 安装 | 克隆 Package 的仓库，检出包索引里该版本的 `ref`（git 标签），在 `.uproject` 里启用；缺少的依赖和所需的引擎插件一起处理 |
-| 更新、降级 | 在已有的 git 检出里 `fetch` 标签，再检出目标版本的 `ref` |
+| 安装 | 有适用的预编译包时，下载、校验并解压它（见 [预编译安装](#预编译安装)）；否则克隆 Package 的仓库，检出包索引里该版本的 `ref`（git 标签），并在需要时编译。两种方式都会在 `.uproject` 里启用它；缺少的依赖和所需的引擎插件一起处理 |
+| 更新、降级 | git 检出：在已有的检出里 `fetch` 标签，再检出目标版本的 `ref`；预编译安装：下载目标版本的预编译包，替换原来的文件夹 |
 | 启用、禁用 | 只修改 `.uproject` 的 `Plugins` 列表；禁用时连带禁用依赖它的 Package |
 | 卸载 | 删除 `.uproject` 里的条目，把 Package 文件夹移到回收站 |
 
 几个边界：
 
 - 引擎插件（如 `ChaosVehiclesPlugin`）只会在 `.uproject` 里启用，不会安装；引擎里没有的会报错。
-- 设置里的“有预编译版本时优先使用”是预留项，目前不可选，也没有任何效果；Package 总是从源码安装，随后编译。
+- 预编译安装只适用于 Epic 启动器安装的引擎和 Win64，详见 [预编译安装](#预编译安装)；其他情况仍然从源码安装，随后编译。
 - 编译、运行测试和重新打开编辑器调用的是 UBT 的 `Build.bat` 和引擎里的 Windows 可执行文件，引擎位置也来自 Windows 注册表，所以目前只支持 Windows。
 
 Package 是什么、有哪些依赖和版本约束，由包索引（格式 2）和各个 `.uplugin` 决定，格式见 uBotCore 仓库的 [`Index/README.md`](https://github.com/AstreoX/uBotCore/blob/main/Index/README.md)。编辑器里的 **uBot** 面板（`Window > uBot`）只显示状态并启动 uBot Manager，详见 uBotCore 的 README。
@@ -24,9 +24,9 @@ Package 是什么、有哪些依赖和版本约束，由包索引（格式 2）�
 ## 运行要求
 
 - Windows 10 或 11；界面基于 WebView2，Windows 11 已自带运行库。
-- UE 5.5，启动器版本或源码版本都可以。
-- git，在 `PATH` 里，或在 `设置 > 安装` 中指定可执行文件。克隆私有仓库需要事先配好 SSH key 或 credential helper，uBot Manager 运行 git 时禁用了交互式提示。
-- 编译需要 Visual Studio 2022（含 C++ 工具链）。Recipe 对话框会检查它是否存在。
+- UE 5.5，启动器版本或源码版本都可以；预编译安装只用于启动器版本。
+- git，在 `PATH` 里，或在 `设置 > 安装` 中指定可执行文件。从源码安装（克隆）和更新 git 检出时需要它。克隆私有仓库需要事先配好 SSH key 或 credential helper，uBot Manager 运行 git 时禁用了交互式提示。
+- 编译需要 Visual Studio 2022（含 C++ 工具链）：从源码安装的 Package 要编译，打包游戏时 UE 也要编译插件的 C++。全部使用预编译包的安装不需要它。Recipe 对话框会检查它是否存在。
 
 ## 启动
 
@@ -90,6 +90,76 @@ uBot Manager 按 `.uproject` 的 `EngineAssociation` 找引擎：
 
 每次刷新后，uBot Manager 把合并后的索引写入 `<项目>/Saved/uBot/index.json`，编辑器里的 uBot 面板读取它；内容没有变化时不重写。
 
+## 预编译安装
+
+条件满足时，uBot Manager 不再克隆仓库再编译，而是直接下载 Package 的预编译压缩包并解压到安装目录：不需要 git，也不用等 UBT 编译。压缩包由 `ubot package` 制作（见 [制作和发布预编译包](#制作和发布预编译包)），下载地址写在包索引每个版本的 `binaries` 字段里。
+
+### 何时使用
+
+下面三条同时满足时，安装和更新使用预编译包：
+
+1. `设置 > 安装 > 有预编译版本时优先使用` 已勾选（默认勾选）。
+2. 项目的引擎是 Epic 启动器安装的，即 `EngineAssociation` 是 `5.5` 这类版本号。启动器版本的二进制在每台机器上都一样；源码构建的引擎，以及 `settings.json` 的 `build.engineId` 里直接写成引擎根目录的引擎，不使用预编译包。
+3. 包索引里这个版本有当前引擎 `主版本.次版本`（如 `5.5`）、平台 `Win64` 的 `binaries` 条目。
+
+不满足时和以前一样：克隆、检出、编译。第 1、2 条满足而索引里没有这个引擎的预编译包时，计划会给出警告“没有适用于 UE 5.5 的 UBotROS 0.1.0 预编译版本，将从源码编译。”没有安装、且条件都满足的 Package，详情里版本旁边会有灰色的“预编译”。
+
+### 下载与解压
+
+计划里的 `下载` 步骤（日志里逐行可见）依次做这些事：
+
+1. 从索引里的地址下载到安装目录里的临时文件 `.ubot-download-<名称>.zip.part`。`file://` 地址和本地绝对路径（团队镜像）直接复制。HTTPS 下载遵循 `HTTPS_PROXY` 和 `HTTP_PROXY`，连接和读取各 30 秒超时，最多跟随 5 次重定向，不会从 https 退到 http。大小上限 2 GiB；索引写了 `size` 时，必须正好相等。步骤的进度显示已下载的字节数，如 `12.3 / 45.6 MB`。
+2. 校验 SHA-256，和索引里的不一致就失败，并删除下载的文件。
+3. 解压到 `.ubot-extract-<名称>`，拒绝绝对路径、盘符、`..`、符号链接和 `.git` 目录，也拒绝顶层不是唯一一个、以 Package 命名的文件夹的压缩包。
+4. 检查 `<名称>.uplugin` 的 `VersionName` 等于要安装的版本；有 C++ 模块的插件还必须带着 `Binaries/Win64` 里的 `UnrealEditor-*.dll` 和 `UnrealEditor.modules`。
+5. 写入安装标记 `.ubot-install.json`（见下）。标记由 uBot Manager 写，不取自压缩包。
+6. 已有同名文件夹（更新、重新安装）时，先把它挪开，新文件夹就位后再把旧的移到回收站。
+
+失败或取消时，临时文件和文件夹都会删除；已经安装的文件夹在第 6 步之前不会被改动。安装目录里以 `.ubot-` 开头的文件夹是 uBot Manager 自己的，扫描项目时会被跳过。
+
+安装标记 `.ubot-install.json` 记录这个文件夹是怎么来的：
+
+```json
+{
+    "kind": "prebuilt",
+    "package": "UBotSensor",
+    "version": "0.1.0",
+    "engine": "5.5",
+    "platform": "Win64",
+    "url": "https://github.com/AstreoX/uBotSensor/releases/download/v0.1.0/UBotSensor-0.1.0-UE5.5-Win64.zip",
+    "sha256": "…",
+    "installedAt": "2026-10-10T08:00:00Z"
+}
+```
+
+`url` 不含凭据、查询串和片段。标记缺失或无效（类型、Package 名、版本或引擎不对）时，这个文件夹算“本地文件夹”。
+
+### 安装方式
+
+Package 详情里的 `安装方式` 显示它是怎么装进项目的（命令行里是 `ubot status` 的 `FROM` 列）。更新时的做法取决于它：
+
+| 显示 | 含义 | 更新 |
+| --- | --- | --- |
+| `git · v0.1.0` | git 检出 | 照旧 `fetch` 并检出目标版本，即使目标版本有预编译包也不换成它 |
+| `预编译 · UE 5.5 · Win64` | uBot Manager 下载安装的，文件夹里有它写的标记 | 重新下载目标版本的预编译包，替换文件夹 |
+| `本地文件夹` | 既不是 git 检出，也没有标记：手动拷贝的，或随工程带来的 | 同上；没有适用的预编译包时，计划报错“没有适用于 UE 5.5 的 UBotCore 0.2.0 预编译版本；请卸载后重新安装，改为从源码编译。” |
+
+想把预编译安装换成从源码编译：取消勾选 `有预编译版本时优先使用`，卸载后重新安装。
+
+### 引擎版本不匹配
+
+预编译包是为某个引擎版本编译的，UE 不会加载别的版本编译出来的模块。已启用的预编译 Package，标记里的引擎版本和项目引擎的 `主版本.次版本` 不同时（比如工程升级到了 UE 5.6），问题列表给出警告“UBotSensor 安装的是 UE 5.4 的预编译版本，但此项目使用 UE 5.5。”，快速修复是 `重新安装 UBotSensor`：对同一个版本做一次更新，重新下载适合当前引擎的预编译包。设置已关闭、引擎不是启动器版本，或索引里没有已安装版本对应这个引擎的预编译包时，不提供“重新安装”，只能禁用，或卸载后从源码安装。
+
+### 什么时候还需要编译
+
+计划里的 `编译` 步骤只在确实有 C++ 要编译时才出现：本次计划克隆或检出了某个启用的 Package，或者某个启用的插件有 C++ 模块却没有 `Binaries/Win64/UnrealEditor-*.dll`。代码全部来自预编译包的计划没有 `编译` 步骤，应用后可以直接使用（`运行测试` 仍然可以运行）。需要编译却找不到 Visual Studio 2022 时，计划给出警告“需要编译 C++，但没有找到 Visual Studio 2022。”
+
+### 限制
+
+- 只适用于 Epic 启动器安装的引擎和 Win64。uBot 的预编译包按 UE 5.5 Win64 制作（索引里的键是 `5.5`）；其他引擎版本、源码构建的引擎和其他平台仍然克隆并编译。
+- 预编译包里只有编辑器用的二进制。在编辑器里使用不需要编译；打包游戏（`打包项目`）时，UE 要为游戏目标编译插件的 C++，这仍需要 Visual Studio 2022，所以压缩包里同时带着 `Source`。
+- 已有的 git 检出不会被换成预编译包，预编译安装也不会变成 git 检出；要换，卸载后重新安装。
+
 ## 使用
 
 ### 视图
@@ -110,20 +180,20 @@ uBot Manager 按 `.uproject` 的 `EngineAssociation` 找引擎：
 
 `应用…` 先让 uBot Manager 做计划，打开 `应用更改` 对话框，确认后点 `应用`。
 
-- 顶部列出错误（让计划无法应用）和警告。常见的有：Package 不是 git 检出或有本地修改（不能更新）、在分支上（更新后会切换到标签）、依赖的版本冲突、安装目录已存在、引擎里没有所需的插件。
-- 步骤按组排列：`下载`（克隆、检出，依赖在前）、`项目`（改 `.uproject`，包括移除）、`编译`、`完成后`（运行测试、重新打开编辑器）。底栏显示 `4 个步骤 · 需要编译`。
+- 顶部列出错误（让计划无法应用）和警告。常见的有：git 检出有本地修改（不能更新）、在分支上（更新后会切换到标签）、依赖的版本冲突、安装目录已存在、引擎里没有所需的插件；不是 git 检出的 Package 更新时没有适用于当前引擎的预编译包（要卸载后重新安装）；没有适用于当前引擎的预编译包，改为从源码编译（警告）；需要编译但没有找到 Visual Studio 2022（警告）。
+- 步骤按组排列：`下载`（克隆、检出、下载预编译包，依赖在前）、`项目`（改 `.uproject`，包括移除）、`编译`、`完成后`（运行测试、重新打开编辑器）。底栏显示 `4 个步骤 · 需要编译`；代码全部来自预编译包的计划没有 `编译` 步骤，底栏也没有“需要编译”。
 - 依赖栏列出这次更改带来的依赖是否满足；选项里可以勾选 `编译后重新打开编辑器` 和 `保存为 Recipe`（任务成功后，把项目里启用的 uBot Package 集合存成你自己的 Recipe）。
 
 细节：
 
 - 安装目录由 `设置 > 安装 > 安装目录` 决定，默认 `Plugins/uBot`。它必须在工程的 `Plugins` 文件夹或 `AdditionalPluginDirectories` 的某一项之内，否则找不到安装的 Package，计划会报错。文件夹名取自索引条目的 `folder`，没有就取仓库地址的最后一段。
-- 更新、降级前，Package 必须是干净的 git 检出。检出的 `.git/config` 如果配置了会让 git 运行外部程序的项（过滤器、`core.sshCommand`、自定义 credential helper 等），uBot Manager 拒绝操作，因为这个文件可能是随工程带来的。
+- 更新、降级 git 检出前，它必须是干净的。检出的 `.git/config` 如果配置了会让 git 运行外部程序的项（过滤器、`core.sshCommand`、自定义 credential helper 等），uBot Manager 拒绝操作，因为这个文件可能是随工程带来的。预编译安装和本地文件夹没有这个要求：它们整个被新下载的预编译包替换（见 [预编译安装](#预编译安装)）。
 - 依赖按版本约束解析：已安装但版本不满足时更新到满足约束的最高版本，没装的装最高的满足版本，已装但被禁用的启用。
 - `.uproject` 的缩进、换行、字段顺序、其他字段和 BOM 都会保持。写入是原子的；文件为只读（Perforce 工作区）时，计划会提示先签出。
-- 编译用 UBT 的 `Build.bat`，目标平台 Win64，配置取自 `设置 > 编译 > 配置`（`Development` 或 `DebugGame`）。进度取自输出里的 `[n/m]`。
+- 编译用 UBT 的 `Build.bat`，目标平台 Win64，配置取自 `设置 > 编译 > 配置`（`Development` 或 `DebugGame`）。进度取自输出里的 `[n/m]`。只有确实有 C++ 要编译时才有这一步（见 [什么时候还需要编译](#什么时候还需要编译)）。
 - 运行测试对应 `Automation RunTests <本次安装、更新或启用的 Package>`，以无界面方式运行 `UnrealEditor-Cmd.exe`；由 `设置 > 编译 > 编译后运行 Package 测试` 决定是否运行。
 
-UE 编辑器正在运行此项目时，除克隆以外的步骤要等编辑器关闭后才能执行。`设置 > 编译 > 应用前等待 UE 编辑器关闭`（默认开启）打开时，这些步骤显示“等待 UE 编辑器关闭”，对话框里的 `关闭编辑器` 会请求编辑器正常关闭（它可能提示保存）；关闭时，对话框提示先关闭编辑器，否则这些步骤会失败。
+UE 编辑器正在运行此项目时，除克隆和下载到新文件夹以外的步骤要等编辑器关闭后才能执行（替换已安装的预编译包时，编辑器可能加载着旧的二进制）。`设置 > 编译 > 应用前等待 UE 编辑器关闭`（默认开启）打开时，这些步骤显示“等待 UE 编辑器关闭”，对话框里的 `关闭编辑器` 会请求编辑器正常关闭（它可能提示保存）；关闭时，对话框提示先关闭编辑器，否则这些步骤会失败。
 
 ### Recipe
 
@@ -143,7 +213,7 @@ Recipe 是一组 Package 的组合，比如“ROS 2 传感器”就是 UBotCore�
 
 一次只运行一个任务。任务的每一步按顺序执行，输出实时进入日志（git 和 UBT 的输出不翻译，便于搜索报错）。
 
-- 某一步失败时，后面的步骤跳过，已经完成的步骤不会回滚；中途取消的克隆会删除不完整的文件夹。
+- 某一步失败时，后面的步骤跳过，已经完成的步骤不会回滚；中途取消的克隆会删除不完整的文件夹，失败或取消的下载会删除它的临时文件。
 - 点停止、关闭程序（最多等 10 秒）、或在命令行按 `Ctrl+C`，都会结束当前步骤的整个进程树，剩余步骤标为已跳过。
 - 保留最近 30 个任务，每步最多 5000 行日志，存在 `tasks.json`。程序退出时仍在运行的任务，下次启动标为失败。
 - 任务结束后自动刷新项目状态。
@@ -160,6 +230,7 @@ Recipe 是一组 Package 的组合，比如“ROS 2 传感器”就是 UBotCore�
 | 需要的引擎插件被禁用 | 警告 | 启用该引擎插件 |
 | 引擎里没有需要的插件 | 错误 | 忽略 |
 | 旧插件（如 `AgentSensorCore`）与取代它的 Package 同时启用 | 警告 | 禁用旧插件；忽略 |
+| 已启用的预编译 Package 是为另一个引擎版本编译的 | 警告 | 重新安装（仅当索引里有已装版本对应当前引擎的预编译包）；禁用此 Package |
 | 描述文件（`.uplugin`）有误 | 警告 | 无 |
 | 依赖循环 | 错误 | 无 |
 | 找不到项目使用的引擎 | 错误 | 打开编译设置 |
@@ -185,6 +256,7 @@ ROS 桥接的检查在每次刷新时进行，前提是 UBotROS 已启用且打�
 | Package 索引 | 显示规划中的 Package | 开 |
 | 安装 | 安装目录 | `Plugins/uBot` |
 | 安装 | Git 可执行文件，旁边的 `测试` 运行 `git --version` | `git` |
+| 安装 | 有预编译版本时优先使用，见 [预编译安装](#预编译安装) | 开 |
 | 编译 | 引擎 | 项目使用的引擎 |
 | 编译 | 配置：Development、DebugGame | `Development` |
 | 编译 | 应用前等待 UE 编辑器关闭 | 开 |
@@ -210,7 +282,7 @@ Git 可执行文件必须是 git 本身，不能是 `cmd`、PowerShell、`bash` 
 - 设置了环境变量 `UBOT_MANAGER_HOME` 时，设置、任务历史和缓存都放在它指向的目录下（`settings.json`、`tasks.json`、`cache\`），并且不写注册表。测试和 CI 应该设置它。
 - 工程里装了 UBotROS 时，ROS 的主机和端口是这个工程自己的：读写 `Config/DefaultUBotROS.ini`（这也是 UE 读取的文件，写在 `DefaultEngine.ini` 里的同名段不生效），只改这两行。没有 UBotROS 时用 `settings.json` 里的值。
 - `settings.json` 里不认识的键会保留。某个键的类型不对只会让它自己回到默认值。整个文件无法解析时使用默认设置，并在下次保存前把原文件复制为 `settings.json.bad-<时间戳>`。
-- `设置 > 安装 > 有预编译版本时优先使用` 目前是灰的。
+- `有预编译版本时优先使用` 默认开启。已有的 `settings.json` 里写着 `install.usePrebuilt` 的，保持它的值；没有这个键的，按开启处理。
 
 ## 命令行 ubot
 
@@ -230,6 +302,7 @@ ubot [--project <.uproject>] [--index <文件或地址>]... [--offline] [--json]
 | `recipes` | Recipe 列表 |
 | `recipe <id> [--no-build] [--yes]` | 应用 Recipe |
 | `engines` | 已安装的 UE 引擎 |
+| `package <Name[@版本]>... --out <目录> [选项]` | 编译并打包预编译包，见 [制作和发布预编译包](#制作和发布预编译包) |
 | `index validate <文件>` | 校验索引文件，有错误时退出码为 1 |
 | `index show` | 各索引源的状态和合并后的索引 |
 
@@ -254,9 +327,23 @@ Project
   6. Enable UBotROS  (MyRobotSim.uproject)
 Build
   7. Build UnrealEditor  (Win64 · Development)
+warning: No prebuilt UBotROS 0.1.0 for UE 5.5; it will be built from source.
+warning: No prebuilt UBotCore 0.1.0 for UE 5.5; it will be built from source.
+warning: No prebuilt UBotSensor 0.1.0 for UE 5.5; it will be built from source.
 ```
 
-这个例子来自一个纯内容工程，所以编译目标是 `UnrealEditor`；有 `Source/*.Target.cs` 的工程在这一步是 `Build <项目名>Editor`。
+这个例子来自一个纯内容工程，所以编译目标是 `UnrealEditor`；有 `Source/*.Target.cs` 的工程在这一步是 `Build <项目名>Editor`。末尾的三条警告出现在项目使用启动器版本的引擎、而索引里还没有这些版本的预编译包的时候。索引里有预编译包时，计划是这样的，没有 `Build`：
+
+```
+Download
+  1. Download UBotCore 0.1.0  (github.com/…/UBotCore-0.1.0-UE5.5-Win64.zip → Plugins/uBot/uBotCore)
+  2. Download UBotSensor 0.1.0  (github.com/…/UBotSensor-0.1.0-UE5.5-Win64.zip → Plugins/uBot/uBotSensor)
+  3. Download UBotROS 0.1.0  (github.com/…/UBotROS-0.1.0-UE5.5-Win64.zip → Plugins/uBot/uBotROS)
+Project
+  4. Enable UBotCore  (required by UBotROS)
+  5. Enable UBotSensor  (required by UBotROS)
+  6. Enable UBotROS  (MyRobotSim.uproject)
+```
 
 ```powershell
 # 执行；--yes 不再询问，--no-build 跳过编译
@@ -276,13 +363,63 @@ ubot index validate Index/index.json
 ```
 
 - 没有 `--project` 时用上次打开的项目；带 `--project` 会同时把它记为上次的项目。
-- 除 `index validate` 和 `engines` 外，每条命令先刷新：`syncOnStart` 开着就同步远程索引，`--offline` 只用缓存。`--index` 用给定的文件或地址替换配置里的索引源，可以重复；文件相对当前目录。给定的索引源加载不了会报错退出（`index show` 除外，它用来查看这种情况）。
+- 除 `index validate` 和 `engines` 外，每条命令先刷新（`package` 对它自己的宿主工程这样做）：`syncOnStart` 开着就同步远程索引，`--offline` 只用缓存。`--index` 用给定的文件或地址替换配置里的索引源，可以重复；文件相对当前目录。给定的索引源加载不了会报错退出（`index show` 除外，它用来查看这种情况）。
 - 只有 `apply` 和 `recipe` 会写入项目的 `Saved/uBot/index.json`，只读命令不改动项目。
 - `apply` 先打印计划，有错误时以 1 退出；没有 `--yes` 时在标准输入询问 `Apply these changes? [y/N]`。执行时逐步打印 `[n/m] 步骤: 状态`，并缩进显示步骤输出。`--run-tests` 和 `--reopen-editor` 默认关闭，命令行不读取设置里对应的两项。
+- `status` 的 `FROM` 列（`info` 里是 `Installed from`）显示 Package 的安装方式：`git v0.1.0`（有本地修改时加 ` (modified)`）、`prebuilt UE 5.5`（标记里记录的引擎版本）、`local folder`。`info` 还有一行 `Prebuilt`，说明这个 Package 的安装或更新现在会不会用预编译包。
 - 退出码：成功 0，失败 1，被取消 130。`Ctrl+C` 取消正在运行的任务，再按一次立即退出。
 - `--json` 输出 JSON：`status` 是完整的快照，`plan` 是计划，`apply` 和 `recipe` 是结束后的任务，`index show` 里的仓库地址不含凭据。
 - 输出是英文。仓库地址里内嵌的凭据（`https://user:token@host`）在所有输出和日志里显示为 `https://***@host`。
 - `UBOT_MANAGER_PERMANENT_DELETE=1` 让 `uninstall` 直接永久删除文件夹而不是移到回收站，供测试和 CI 使用；桌面程序没有这个开关。
+
+### 制作和发布预编译包
+
+`ubot package` 在一个临时的纯内容工程里，从源码安装并用启动器引擎编译指定的 Package，再把每个 Package 打成 zip，并给出可以直接写进包索引的 `binaries` 条目。
+
+```
+ubot package <Name[@版本]>... --out <目录> [--engine <5.5 | 引擎根目录>] [--url-template <模板>]
+             [--update-index <索引文件>] [--with-symbols] [--keep-work]
+```
+
+`--index`、`--offline` 照常有效。`package` 不需要打开项目，会忽略 `--project`，也不动你的设置、任务历史和最近的项目。
+
+| 选项 | 说明 |
+| --- | --- |
+| `<Name[@版本]>` | 要打包的 Package，可以写多个；省略版本取最新的非规划版本。版本从包索引里取 |
+| `--out <目录>` | 必填。压缩包和 `.sha256` 文件放在这里 |
+| `--engine` | 启动器引擎的版本号（如 `5.5`），或启动器引擎的根目录；省略时用最新的启动器引擎。源码构建的引擎会被拒绝。引擎的 `主版本.次版本` 决定索引里的键和文件名 |
+| `--url-template` | 压缩包的下载地址模板，默认 `https://github.com/AstreoX/{repo}/releases/download/{ref}/{file}`。占位符：`{repo}`（仓库名，不含 `.git`）、`{ref}`、`{file}`、`{name}`、`{version}`、`{engine}`。结果必须是 `https://`、`file://` 或绝对路径 |
+| `--update-index <文件>` | 把 `binaries` 条目写进这个索引文件，再校验一遍 |
+| `--with-symbols` | 压缩包里保留 `*.pdb`、`*.exp`、`*.lib`（默认不含） |
+| `--keep-work` | 保留 `<out>\_work` 里的临时工程（默认结束后删除） |
+
+做了什么：
+
+1. 在 `<out>\_work` 里建一个纯内容的宿主工程（`EngineAssociation` 是所选引擎）。`_work` 里放着标记文件 `.ubot-package-work`；已存在的 `_work` 只有带这个标记、或者是空的才会被替换，别的内容不会被动，命令直接报错。
+2. 通过普通的计划和任务安装这些 Package：关闭预编译、打开编译，所以它们**以及它们依赖的 Package** 都按索引里的 `ref` 克隆并编译（输出里能看到 `Clone …` 和 `Build …`）。只打包你列出的 Package，要让依赖也有预编译包，把它们一起列出。
+3. 检查每个 Package 的 `VersionName` 等于索引里的版本，有 C++ 模块的插件编译后有 `Binaries/Win64/UnrealEditor-*.dll` 和 `UnrealEditor.modules`；然后打成 `<out>\<Name>-<版本>-UE<主.次>-Win64.zip`，旁边写同名的 `.sha256` 文件。
+4. 打印每个 Package 的 `binaries` 条目（`url`、`sha256`、`size`）。带 `--update-index` 时同时写进索引文件：只改对应版本的 `binaries[引擎][Win64]`，其余内容保持原有的键顺序和格式（新写入的部分用 4 空格缩进）；结果通不过校验时，索引文件保持原样并报错。
+
+压缩包的内容：只有一个以 Package 命名的顶层文件夹（`UBotSensor/`），里面是 `UBotSensor.uplugin`、`Binaries/Win64`、`Source`、`Resources`、`Config` 等；没有 `.git`、`Intermediate`、`Saved`，默认也没有 `*.pdb`、`*.exp`、`*.lib`。
+
+#### 发布流程
+
+给一个 Package 发布新版本的预编译包：
+
+1. 按 uBotCore 的 [`Index/README.md`](https://github.com/AstreoX/uBotCore/blob/main/Index/README.md) 发布源码版本：改 `.uplugin` 的 `VersionName`，打标签 `v<VersionName>` 并推送，在 `Index/index.json` 里追加这个版本（有 `ref`，暂时没有 `binaries`）。`ubot package` 按索引里的 `ref` 克隆，所以标签必须已经推送。
+2. 打包，并把条目写进本地的索引文件。要打包的版本还没有出现在 `main` 上，所以用 `--index` 指向本地副本：
+
+   ```powershell
+   $index = '..\..\Plugins\uBot\uBotCore\Index\index.json'
+   ubot --index $index package UBotCore UBotSensor UBotROS --out E:\release --update-index $index
+   ```
+
+   这一步要完整地编译一遍，耗时取决于机器；需要 git、启动器版本的引擎和 Visual Studio 2022。
+3. 把 `E:\release` 里的 zip 上传到各自仓库、对应标签的 GitHub Release（默认模板的地址是 `https://github.com/AstreoX/<仓库>/releases/download/<标签>/<文件名>`），文件名必须和索引里 `url` 的最后一段一致。可以用网页，也可以用 `gh release upload`。
+4. 校验：`ubot index validate $index`。可以在一个使用启动器引擎的测试工程里再跑 `ubot plan install:UBotROS`，计划里应该出现 `Download` 步骤、没有 `Build`。
+5. 提交并推送 uBotCore 的 `Index/index.json`（远程源读取的就是 `main`），再在这个仓库运行 `node scripts/sync-index.mjs` 更新内置副本。
+
+先上传、后推送索引：索引一推送，用户就会开始下载。压缩包重新上传过（字节变了）就必须重新 `--update-index`，否则 SHA-256 和 `size` 对不上，安装会失败。
 
 ## 从源码构建
 
@@ -302,7 +439,7 @@ cargo build --release -p ubot-cli      # 生成 target\release\ubot.exe
 
 - `npm run tauri build` 由 Tauri CLI 驱动：先运行 `npm run build` 生成 `app/dist`，再编译外壳并把前端嵌入。不要直接用 `cargo build` 构建 `ubot-manager`，那样得到的是开发构建，会去加载 `http://localhost:5173`。
 - 去掉 `--no-bundle` 会按 `tauri.conf.json` 生成 NSIS 安装包 `target\release\bundle\nsis\uBot Manager_<版本>_x64-setup.exe`：按当前用户安装，可在安装向导里选择目录，界面随系统语言显示中文或英文。首次打包时 Tauri 会把 NSIS 下载到 `%LOCALAPPDATA%\tauri`（不能改位置；想放到别的盘，可以先把这个目录建成指向别处的目录联接）。安装包没有代码签名，SmartScreen 会提示未知发布者。
-- 开发：在 `app/` 里运行 `npm run tauri dev` 启动带热更新的桌面程序；`npm run dev` 只启动前端，页面使用内存里的 mock 后端，可以用参数直达某个界面，例如 `http://localhost:5173/?lang=zh-CN&theme=light&view=problems`，参数有 `lang`、`theme`、`view`、`dialog`、`section`、`select`、`noproject`。
+- 开发：在 `app/` 里运行 `npm run tauri dev` 启动带热更新的桌面程序；`npm run dev` 只启动前端，页面使用内存里的 mock 后端，可以用参数直达某个界面，例如 `http://localhost:5173/?lang=zh-CN&theme=light&view=problems`，参数有 `lang`、`theme`、`view`、`dialog`、`section`、`select`、`noproject`，以及 `prebuilt=0`（“有预编译版本时优先使用”从关闭开始，安装就走克隆加编译；默认是开）。
 
 测试：
 
@@ -323,8 +460,8 @@ npm run build             # tsc 类型检查 + vite 构建
 
 | 路径 | 内容 |
 | --- | --- |
-| `crates/ubot-core` | 核心库：索引、项目模型、版本约束、问题、计划、任务执行、设置。`assets/index.json` 是内置的索引副本 |
-| `crates/ubot-cli` | 命令行 `ubot` |
+| `crates/ubot-core` | 核心库：索引、项目模型、版本约束、问题、计划、任务执行、设置，以及预编译包的下载、校验、解压和打包。`assets/index.json` 是内置的索引副本 |
+| `crates/ubot-cli` | 命令行 `ubot`，包括 `ubot package` |
 | `src-tauri` | Tauri 外壳：命令、事件、单实例、启动流程、注册表登记 |
 | `app` | 前端（Vite、React、TypeScript）：视图、对话框、中英文语言包、mock 后端 |
 | `scripts` | `sync-index.mjs` |

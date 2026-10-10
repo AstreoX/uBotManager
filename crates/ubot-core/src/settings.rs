@@ -59,7 +59,7 @@ impl Default for InstallSettings {
         InstallSettings {
             directory: DEFAULT_INSTALL_DIRECTORY.into(),
             git: "git".into(),
-            use_prebuilt: false,
+            use_prebuilt: true,
         }
     }
 }
@@ -725,6 +725,10 @@ mod tests {
         assert!(!store.settings.index.show_planned, "good sibling kept");
         assert_eq!(store.settings.install.directory, "Plugins/Mine");
         assert_eq!(store.settings.install.git, "git");
+        assert!(
+            store.settings.install.use_prebuilt,
+            "a file without the key gets the default"
+        );
         assert_eq!(
             store.settings.build.configuration,
             BuildConfiguration::Development
@@ -739,6 +743,34 @@ mod tests {
         assert_eq!(saved["future"], 1);
         assert_eq!(saved["index"]["sources"][0]["id"], "team");
         assert_eq!(saved["install"]["directory"], "Plugins/Mine");
+    }
+
+    #[test]
+    fn prebuilt_binaries_are_used_unless_the_file_says_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::under(dir.path().to_path_buf());
+        assert!(SettingsStore::load(&dirs).settings.install.use_prebuilt);
+
+        // An existing file keeps its value, also across a save.
+        std::fs::write(
+            dirs.settings_file(),
+            json!({ "install": { "directory": "Plugins/uBot", "usePrebuilt": false } }).to_string(),
+        )
+        .unwrap();
+        let mut store = SettingsStore::load(&dirs);
+        assert!(!store.settings.install.use_prebuilt);
+        store.save().unwrap();
+        assert!(!SettingsStore::load(&dirs).settings.install.use_prebuilt);
+
+        std::fs::write(
+            dirs.settings_file(),
+            json!({ "install": { "usePrebuilt": "yes" } }).to_string(),
+        )
+        .unwrap();
+        assert!(
+            SettingsStore::load(&dirs).settings.install.use_prebuilt,
+            "a value of the wrong type takes the default"
+        );
     }
 
     #[test]

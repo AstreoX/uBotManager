@@ -20,6 +20,8 @@ export interface Requirement {
   installedVersion: string | null;
 }
 export interface GitState { isCheckout: boolean; ref: string | null; dirty: boolean }
+/** The engine (Major.Minor) and platform an installed prebuilt package was built for, from its install marker. */
+export interface PrebuiltInfo { engine: string; platform: string }
 export interface PackageInfo {
   name: string; friendlyName: string; description: LocalizedText; layer: Layer; state: PackageState;
   installedVersion: string | null; latestVersion: string | null;
@@ -28,6 +30,9 @@ export interface PackageInfo {
   updateAvailable: boolean;
   location: string | null;          // project-relative, '/' separators ("Plugins/uBot/uBotSensor", "../Plugins/uBot/uBotCore")
   git: GitState | null;             // null when not installed
+  installKind: 'git' | 'prebuilt' | 'other' | null;  // .git checkout / valid .ubot-install.json marker / neither; null when not installed
+  prebuiltAvailable: boolean;       // an install or update of it would use prebuilt binaries for this project right now
+  prebuilt: PrebuiltInfo | null;    // set exactly when installKind is 'prebuilt'; the engine it was built for, even if disabled
   repository: string | null; webUrl: string | null; docsUrl: string | null;
   indexSource: string | null;       // id of the source that defined it
   requires: Requirement[]; provides: string[]; tags: string[];
@@ -75,7 +80,7 @@ export interface Snapshot {
 export type ChangeKind = 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
 export interface Change { kind: ChangeKind; package: string; version: string | null }
 export type StepGroup = 'download' | 'project' | 'build' | 'after';
-export type StepKind = 'clone' | 'checkout' | 'enablePackage' | 'disablePackage' | 'enableEnginePlugin'
+export type StepKind = 'clone' | 'checkout' | 'download' | 'enablePackage' | 'disablePackage' | 'enableEnginePlugin'
   | 'removePackage' | 'build' | 'runTests' | 'openEditor';
 export interface PlanStep { id: string; n: number; group: StepGroup; kind: StepKind; title: Msg; detail: Msg; needsEditorClosed: boolean }
 export interface ApplyOptions { build: boolean; reopenEditor: boolean; runTests: boolean }

@@ -10,12 +10,14 @@ import { format, msgFromEnglish, renderMsg, setLanguage, tn, translate, translat
 const SPEC_CODES = [
   "problem.requiresVersion", "problem.requiresMissing", "problem.requiresDisabled", "problem.enginePluginMissing",
   "problem.enginePluginDisabled", "problem.legacyConflict", "problem.descriptorInvalid", "problem.dependencyCycle",
-  "problem.engineNotFound", "problem.indexSourceFailed", "problem.rosBridgeUnreachable",
+  "problem.engineNotFound", "problem.indexSourceFailed", "problem.rosBridgeUnreachable", "problem.prebuiltEngineMismatch",
   "fact.package", "fact.requires", "fact.installed", "fact.legacy", "fact.replacement", "fact.redirects", "fact.source",
   "fact.address", "fact.time", "fact.plugin", "fact.engine", "fact.file",
   "session.lastPie", "session.lastEditor", "session.lastGame",
   "fix.updateTo", "fix.install", "fix.enable", "fix.disable", "fix.ignore", "fix.openRosSettings", "fix.openBuildSettings",
-  "step.clone", "step.clone.detail", "step.checkout", "step.checkout.detail", "step.enablePackage", "step.disablePackage",
+  "fix.reinstall",
+  "step.clone", "step.clone.detail", "step.checkout", "step.checkout.detail", "step.download", "step.download.detail",
+  "step.enablePackage", "step.disablePackage",
   "step.enableEnginePlugin", "step.removePackage", "step.removePackage.detail", "step.detail.project",
   "step.detail.requiredBy", "step.build", "step.build.detail", "step.runTests", "step.runTests.detail", "step.openEditor",
   "step.openEditor.detail",
@@ -23,7 +25,8 @@ const SPEC_CODES = [
   "plan.dirty", "plan.onBranch", "plan.breaksDependent", "plan.alsoDisable", "plan.enginePluginMissing",
   "plan.folderExists", "plan.unsafeUrl", "plan.noEngine", "plan.engineVersion", "plan.outsideProject", "plan.pluginRoot",
   "plan.notPluginDir", "plan.gitUnreadable", "plan.unsafeRef", "plan.unsafeName", "plan.unsafeProjectName",
-  "plan.unsafeBuildPath", "plan.projectReadOnly", "plan.noProject",
+  "plan.unsafeBuildPath", "plan.projectReadOnly", "plan.noProject", "plan.prebuiltUnavailable", "plan.noPrebuilt",
+  "plan.noCompiler",
   "task.apply", "task.recipe", "task.install", "task.busy", "task.editorRunning",
   // Verbatim text (session messages, anything the core has no code for), shown as it is.
   "text"
@@ -37,9 +40,13 @@ const SPEC_PARAMS: Record<string, string[]> = {
   "problem.enginePluginMissing": ["plugin"],
   "problem.legacyConflict": ["legacy", "replacement"],
   "problem.rosBridgeUnreachable": ["address"],
+  "problem.prebuiltEngineMismatch": ["package", "built", "engine"],
+  "fix.reinstall": ["package"],
   "fix.updateTo": ["package", "version"],
   "step.clone": ["package", "version"],
   "step.clone.detail": ["repo", "dest"],
+  "step.download": ["package", "version"],
+  "step.download.detail": ["source", "dest"],
   "step.build": ["target"],
   "step.build.detail": ["platform", "configuration"],
   "plan.breaksDependent": ["package", "dependent", "range"],
@@ -52,6 +59,9 @@ const SPEC_PARAMS: Record<string, string[]> = {
   "plan.unsafeProjectName": ["name"],
   "plan.unsafeBuildPath": ["path"],
   "plan.projectReadOnly": ["file"],
+  "plan.prebuiltUnavailable": ["package", "version", "engine"],
+  "plan.noPrebuilt": ["package", "version", "engine"],
+  "plan.noCompiler": [],
   "task.recipe": ["recipe", "project"],
   "text": ["text"]
 };
@@ -208,6 +218,20 @@ describe("translation", () => {
     expect(renderMsg("zh-CN", msg)).toBe("需要 UBotCore ^0.2.0，当前安装的是 0.1.0。");
     expect(renderMsg("en", { code: "task.apply", params: { project: "MyRobotSim" } })).toBe("Apply Changes · MyRobotSim");
     expect(renderMsg("zh-CN", { code: "step.detail.requiredBy", params: { package: "UBotVehicles" } })).toBe("UBotVehicles 需要");
+  });
+
+  it("renders the prebuilt binaries messages in both languages", () => {
+    const download = { code: "step.download", params: { package: "UBotVehicles", version: "0.1.0" } };
+    expect(renderMsg("en", download)).toBe("Download UBotVehicles 0.1.0");
+    expect(renderMsg("zh-CN", download)).toBe("下载 UBotVehicles 0.1.0");
+    const unavailable = { code: "plan.prebuiltUnavailable", params: { package: "UBotMCP", version: "0.1.0", engine: "5.5" } };
+    expect(renderMsg("en", unavailable)).toBe("No prebuilt UBotMCP 0.1.0 for UE 5.5; it will be built from source.");
+    expect(renderMsg("zh-CN", unavailable)).toBe("没有适用于 UE 5.5 的 UBotMCP 0.1.0 预编译版本，将从源码编译。");
+    const mismatch = { code: "problem.prebuiltEngineMismatch", params: { package: "UBotCombat", built: "5.4", engine: "5.5" } };
+    expect(renderMsg("en", mismatch)).toBe("UBotCombat was installed prebuilt for UE 5.4, but this project uses UE 5.5.");
+    expect(renderMsg("zh-CN", mismatch)).toBe("UBotCombat 安装的是 UE 5.4 的预编译版本，但此项目使用 UE 5.5。");
+    expect(renderMsg("zh-CN", { code: "fix.reinstall", params: { package: "UBotCombat" } })).toBe("重新安装 UBotCombat");
+    expect(renderMsg("zh-CN", { code: "plan.noCompiler", params: {} })).toBe("需要编译 C++，但没有找到 Visual Studio 2022。");
   });
 
   it("renders verbatim text as it is", () => {

@@ -176,7 +176,8 @@ fn setup() -> Option<(tempfile::TempDir, Env)> {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        git(&bare, &["tag", "v0.1.0", "HEAD"]);
+        // The real repositories may carry a v0.1.0 tag already; the copy's is moved to HEAD.
+        git(&bare, &["tag", "-f", "v0.1.0", "HEAD"]);
     }
 
     // UBotCore 0.2.0: a commit that bumps VersionName, made in a temporary working clone.

@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { Change, StepStatus, Task } from "../api/types";
+import { setLanguage } from "../i18n";
 import {
-  MAX_LOG_LINES, activeTask, appendLog, canRerun, canSwitchProject, capLines, defaultSelection, isTaskOfProject, mergeLog,
-  mergeTasks, stoppedStep
+  MAX_LOG_LINES, activeTask, appendLog, canRerun, canSwitchProject, capLines, defaultSelection, isDownloadStep, isTaskOfProject,
+  mergeLog, mergeTasks, stoppedStep, taskProgress
 } from "./tasks";
+
+afterEach(() => setLanguage("en"));
 
 /** `Task.project` is the project's name, like the core stores it. */
 function task(id: string, status: StepStatus, steps: StepStatus[], startedAt = "2026-10-10T08:00:00Z", error: string | null = null): Task {
@@ -146,5 +149,51 @@ describe("task log", () => {
     expect(mergeLog(["a", "b"], ["a", "b"])).toEqual(["a", "b"]);
     expect(mergeLog([], ["x"])).toEqual(["x"]);
     expect(mergeLog(lines(MAX_LOG_LINES), lines(5, MAX_LOG_LINES))).toHaveLength(MAX_LOG_LINES);
+  });
+});
+
+describe("taskProgress", () => {
+  const MB = 1024 * 1024;
+  const download = (status: StepStatus, progress: { done: number; total: number } | null): Task => {
+    const t = task("d", "running", [status, "pending", "pending"]);
+    const first = t.steps[0];
+    if (first) {
+      first.title = { code: "step.download", params: { package: "UBotVehicles", version: "0.1.0" } };
+      first.progress = progress;
+    }
+    return t;
+  };
+
+  it("counts the bytes of a download, in MB with one decimal", () => {
+    const p = taskProgress(download("running", { done: Math.round(12.3 * MB), total: Math.round(45.6 * MB) }));
+    expect(p.text).toBe("Downloading UBotVehicles 0.1.0");
+    expect(p.count).toBe("12.3 / 45.6 MB");
+    expect(p.done / p.total).toBeCloseTo(12.3 / 45.6, 3);
+    expect(p.indeterminate).toBe(false);
+    setLanguage("zh-CN");
+    const zh = taskProgress(download("running", { done: 0, total: 47_815_066 }));
+    expect(zh.text).toBe("正在下载 UBotVehicles 0.1.0");
+    expect(zh.count).toBe("0.0 / 45.6 MB");
+  });
+
+  it("runs the bar without a fill while the size of a download is unknown", () => {
+    const p = taskProgress(download("running", { done: 5 * MB, total: 0 }));
+    expect(p.count).toBe("5.0 MB");
+    expect(p.indeterminate).toBe(true);
+  });
+
+  it("counts build actions and steps like before", () => {
+    const build = task("b", "running", ["done", "running"]);
+    const step = build.steps[1];
+    if (step) step.progress = { done: 15, total: 24 };
+    expect(taskProgress(build)).toMatchObject({ text: "Building T", done: 15, total: 24, count: "15/24", indeterminate: false });
+    // A download that has not reported bytes yet counts steps.
+    expect(taskProgress(download("running", null))).toMatchObject({ done: 1, total: 3, count: "1/3" });
+    expect(taskProgress(download("waiting", null)).text).toBe("Waiting for Unreal Editor to close");
+  });
+
+  it("knows download steps by their title", () => {
+    expect(isDownloadStep({ title: { code: "step.download", params: {} } })).toBe(true);
+    expect(isDownloadStep({ title: { code: "step.clone", params: {} } })).toBe(false);
   });
 });

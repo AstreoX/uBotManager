@@ -2,17 +2,21 @@
 //! and the merged index, resolving requirements, dependents and engine plugins.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::descriptor::Dependency;
 use crate::graph;
-use crate::index::{is_plugin_name, is_safe_ref, IndexPackage, IndexVersion};
+use crate::index::{is_plugin_name, is_safe_ref, IndexPackage, IndexVersion, PrebuiltBinary};
 use crate::model::{
-    ApplyOptions, BuildConfiguration, Change, ChangeKind, Msg, Plan, PlanStep, StepGroup, StepKind,
+    ApplyOptions, BuildConfiguration, Change, ChangeKind, EngineKind, InstallKind, Msg, Plan,
+    PlanStep, StepGroup, StepKind,
 };
 use crate::msg::{msg, msg0};
 use crate::paths;
-use crate::url::{check_repository_url, display_repository, redact_credentials};
+use crate::prebuilt;
+use crate::url::{
+    check_repository_url, display_download_source, display_repository, redact_credentials,
+};
 use crate::version::{Constraint, SemVer};
 use crate::workspace::{index_requirements, Workspace};
 
@@ -31,6 +35,19 @@ pub enum StepAction {
         package: String,
         dir: PathBuf,
         git_ref: String,
+    },
+    /// Installs prebuilt binaries: fetch, verify, extract, swap into `dest`, write the marker.
+    Download {
+        package: String,
+        version: String,
+        url: String,
+        sha256: String,
+        size: Option<u64>,
+        /// `Major.Minor` of the engine the binaries are for.
+        engine: String,
+        dest: PathBuf,
+        /// `dest` exists and is replaced (an update or reinstall).
+        replace: bool,
     },
     SetEnabled {
         plugin: String,
@@ -101,11 +118,22 @@ struct CheckoutRecord {
     dir: PathBuf,
 }
 
+struct DownloadRecord {
+    package: String,
+    version: String,
+    binary: PrebuiltBinary,
+    engine: String,
+    dest: PathBuf,
+    /// The folder exists: an update or reinstall replaces it.
+    replace: bool,
+}
+
 struct Planner<'a> {
     workspace: &'a Workspace,
     packages: HashMap<String, VPackage>,
     clones: Vec<CloneRecord>,
     checkouts: Vec<CheckoutRecord>,
+    downloads: Vec<DownloadRecord>,
     /// (package, required by)
     enables: Vec<(String, Option<String>)>,
     engine_enables: Vec<(String, Option<String>)>,
@@ -160,6 +188,7 @@ impl<'a> Planner<'a> {
             packages: HashMap::new(),
             clones: Vec::new(),
             checkouts: Vec::new(),
+            downloads: Vec::new(),
             enables: Vec::new(),
             engine_enables: Vec::new(),
             disables: Vec::new(),
@@ -370,39 +399,142 @@ impl<'a> Planner<'a> {
                 .clones
                 .iter()
                 .any(|clone| paths::same_path(&clone.dest, &dest))
+            || self
+                .downloads
+                .iter()
+                .any(|download| paths::same_path(&download.dest, &dest))
         {
             self.error(msg("plan.folderExists", &[("dest", &dest_display)]));
             return;
         }
-        let Some(git_ref) = version.git_ref.clone() else {
-            self.error(msg(
-                "plan.noVersion",
-                &[("package", &display), ("range", &version.version)],
-            ));
-            return;
-        };
-        if !is_safe_ref(&git_ref) {
-            self.error(msg(
-                "plan.unsafeRef",
-                &[("package", &display), ("ref", &git_ref)],
-            ));
+        if !self.acquire(&display, version, &repository, &dest) {
             return;
         }
         self.check_engine_constraint(&display, version);
-
-        self.clones.push(CloneRecord {
-            package: display.clone(),
-            version: version.version.clone(),
-            url: repository,
-            git_ref,
-            dest: dest.clone(),
-        });
         self.apply_version(&display, version);
         let package = self.package(&display);
         package.installed = true;
         package.is_ubot = true;
         package.dir = Some(dest);
         self.ensure_enabled(&display, required_by);
+    }
+
+    /// Plans how a package that is not on disk yet gets to `dest` at `version`: prebuilt binaries
+    /// when they apply (`install.usePrebuilt`, a launcher engine and binaries for it in the index),
+    /// else a clone of `repository`. Replaces whatever this plan had planned for the package.
+    /// Returns false (with an error) when neither is possible.
+    fn acquire(
+        &mut self,
+        display: &str,
+        version: &IndexVersion,
+        repository: &str,
+        dest: &Path,
+    ) -> bool {
+        self.clones
+            .retain(|clone| !clone.package.eq_ignore_ascii_case(display));
+        self.downloads
+            .retain(|download| !download.package.eq_ignore_ascii_case(display));
+        self.warnings.retain(|warning| {
+            warning.code != "plan.prebuiltUnavailable"
+                || !warning
+                    .params
+                    .get("package")
+                    .is_some_and(|package| package.eq_ignore_ascii_case(display))
+        });
+        if let Some((binary, engine)) = self.workspace.prebuilt_binary(version) {
+            self.downloads.push(DownloadRecord {
+                package: display.to_string(),
+                version: version.version.clone(),
+                binary,
+                engine,
+                dest: dest.to_path_buf(),
+                replace: false,
+            });
+            return true;
+        }
+        let Some(git_ref) = version.git_ref.clone() else {
+            self.error(msg(
+                "plan.noVersion",
+                &[("package", display), ("range", &version.version)],
+            ));
+            return false;
+        };
+        if !is_safe_ref(&git_ref) {
+            self.error(msg(
+                "plan.unsafeRef",
+                &[("package", display), ("ref", &git_ref)],
+            ));
+            return false;
+        }
+        if let Some(engine) = self.workspace.prebuilt_engine() {
+            self.warning(msg(
+                "plan.prebuiltUnavailable",
+                &[
+                    ("package", display),
+                    ("version", &version.version),
+                    ("engine", &engine),
+                ],
+            ));
+        }
+        self.clones.push(CloneRecord {
+            package: display.to_string(),
+            version: version.version.clone(),
+            url: repository.to_string(),
+            git_ref,
+            dest: dest.to_path_buf(),
+        });
+        true
+    }
+
+    /// Replaces an installed package that is not a git checkout with the prebuilt binaries of
+    /// `target`: an update, or the reinstall of the version it has. Without binaries for this
+    /// project (whatever the reason: the setting is off, the engine is a source build, the index
+    /// has none for it) the package has to be uninstalled and installed again, from source;
+    /// `plan.noPrebuilt` says so whenever the engine is known. Without an engine the only
+    /// thing to say is that the package is not a git checkout.
+    fn replace_with_prebuilt(&mut self, display: &str, target: &IndexVersion) {
+        let Some((binary, engine)) = self.workspace.prebuilt_binary(target) else {
+            match self.workspace.engine_major_minor() {
+                Some(engine) => self.error(msg(
+                    "plan.noPrebuilt",
+                    &[
+                        ("package", display),
+                        ("version", &target.version),
+                        ("engine", &engine),
+                    ],
+                )),
+                None => self.error(msg("plan.notGit", &[("package", display)])),
+            }
+            return;
+        };
+        let workspace = self.workspace;
+        let Some(project) = workspace.project() else {
+            return;
+        };
+        let dir = self.package(display).dir.clone().unwrap_or_default();
+        // The folder goes to the Recycle Bin when the new one is in place: never a plugin root,
+        // which holds other plugins too.
+        if !project.is_discoverable(&dir) || project.is_plugin_root(&dir) {
+            self.error(msg("plan.pluginRoot", &[("path", &project.location(&dir))]));
+            return;
+        }
+        self.check_engine_constraint(display, target);
+        self.checkouts
+            .retain(|checkout| !checkout.package.eq_ignore_ascii_case(display));
+        self.downloads
+            .retain(|download| !download.package.eq_ignore_ascii_case(display));
+        self.downloads.push(DownloadRecord {
+            package: display.to_string(),
+            version: target.version.clone(),
+            binary,
+            engine,
+            dest: dir,
+            replace: true,
+        });
+        self.apply_version(display, target);
+        if self.package(display).enabled {
+            self.resolve_requirements(display);
+        }
     }
 
     /// Enables a package (if needed) and resolves its requirements.
@@ -604,6 +736,7 @@ impl<'a> Planner<'a> {
             .iter()
             .map(|clone| key(&clone.package))
             .chain(self.checkouts.iter().map(|checkout| key(&checkout.package)))
+            .chain(self.downloads.iter().map(|download| key(&download.package)))
             .collect();
         let mut conflicts = self.turned_back_updates();
         if touched.is_empty() && conflicts.is_empty() {
@@ -788,7 +921,7 @@ impl<'a> Planner<'a> {
     /// (see `requested`). One that changes nothing is not.
     fn update_requested(&mut self, name: &str, version: &str) {
         let before = self.package(name).semver();
-        self.update(name, version);
+        self.update_to(name, version, true);
         let wanted = self
             .index_package(name)
             .and_then(|package| package.find_version(version))
@@ -805,6 +938,12 @@ impl<'a> Planner<'a> {
     /// Updates (or downgrades) an installed package. Whether the dependents still get what they
     /// require is decided once for the whole plan, in `verify`.
     fn update(&mut self, name: &str, version: &str) {
+        self.update_to(name, version, false);
+    }
+
+    /// [`Planner::update`]; with `reinstall` (an update the user asked for) a prebuilt install
+    /// at the version it has is downloaded again.
+    fn update_to(&mut self, name: &str, version: &str, reinstall: bool) {
         let display = self.package(name).name.clone();
         if !self.package(name).installed {
             self.error(msg("plan.notInstalled", &[("package", &display)]));
@@ -827,32 +966,44 @@ impl<'a> Planner<'a> {
         };
         let target_semver = target.semver();
 
-        // A package cloned by this plan is cloned at the new version instead.
-        if let Some(clone) = self
+        // A package this plan installs is installed at the new version instead (cloned, or
+        // downloaded when that version has binaries).
+        let fresh = self
             .clones
-            .iter_mut()
+            .iter()
             .find(|clone| clone.package.eq_ignore_ascii_case(&display))
-        {
-            if let Some(git_ref) = &target.git_ref {
-                if !is_safe_ref(git_ref) {
-                    self.error(msg(
-                        "plan.unsafeRef",
-                        &[("package", &display), ("ref", git_ref)],
-                    ));
-                    return;
-                }
-                clone.version = target.version.clone();
-                clone.git_ref = git_ref.clone();
+            .map(|clone| (clone.dest.clone(), clone.url.clone()))
+            .or_else(|| {
+                self.downloads
+                    .iter()
+                    .find(|download| {
+                        !download.replace && download.package.eq_ignore_ascii_case(&display)
+                    })
+                    .map(|download| {
+                        let repository = index_package.repository.clone().unwrap_or_default();
+                        (download.dest.clone(), repository)
+                    })
+            });
+        if let Some((dest, repository)) = fresh {
+            if !self.acquire(&display, target, &repository, &dest) {
+                return;
             }
+            self.check_engine_constraint(&display, target);
             self.apply_version(&display, target);
             self.resolve_requirements(&display);
             return;
         }
+        let kind = self.workspace.install_kind(name);
         if self
             .package(name)
             .semver()
             .is_some_and(|current| Some(&current) == target_semver.as_ref())
         {
+            // The version it has; a prebuilt install the user asks to update is downloaded again
+            // (for another engine, or to repair it).
+            if reinstall && kind == Some(InstallKind::Prebuilt) {
+                self.replace_with_prebuilt(&display, target);
+            }
             return;
         }
 
@@ -866,6 +1017,8 @@ impl<'a> Planner<'a> {
         if on_disk.is_some() && on_disk == target_semver {
             self.checkouts
                 .retain(|checkout| !checkout.package.eq_ignore_ascii_case(&display));
+            self.downloads
+                .retain(|download| !download.package.eq_ignore_ascii_case(&display));
             self.apply_version(&display, target);
             if self.package(name).enabled {
                 self.resolve_requirements(&display);
@@ -873,6 +1026,12 @@ impl<'a> Planner<'a> {
             return;
         }
 
+        // Only a git checkout is updated with git; anything else is replaced by prebuilt
+        // binaries, when there are any for this project.
+        if kind != Some(InstallKind::Git) {
+            self.replace_with_prebuilt(&display, target);
+            return;
+        }
         let git = self.workspace.git(name).cloned().unwrap_or_default();
         if !git.is_checkout {
             self.error(msg("plan.notGit", &[("package", &display)]));
@@ -1109,7 +1268,61 @@ impl<'a> Planner<'a> {
     fn sorted_download_names(&mut self) -> Vec<String> {
         let mut names: Vec<String> = self.clones.iter().map(|c| c.package.clone()).collect();
         names.extend(self.checkouts.iter().map(|c| c.package.clone()));
+        names.extend(self.downloads.iter().map(|d| d.package.clone()));
         self.dependencies_first(names)
+    }
+
+    /// Whether the plan leaves code to compile: a package that is enabled after it whose code
+    /// comes from source - cloned or checked out by this plan, or installed from source without
+    /// editor binaries. Packages that come prebuilt (downloaded now, or with a valid marker)
+    /// need no build, and neither do plugins without modules. Engine plugins enabled for an
+    /// engine that is not a launcher install may need building, too.
+    fn source_build_needed(&mut self) -> bool {
+        let launcher = self
+            .workspace
+            .project
+            .as_ref()
+            .and_then(|context| context.engine.as_ref())
+            .is_some_and(|engine| engine.kind == EngineKind::Launcher);
+        if !self.engine_enables.is_empty() && !launcher {
+            return true;
+        }
+        self.load_all_installed();
+        let mut enabled: Vec<String> = self
+            .packages
+            .values()
+            .filter(|package| package.installed && package.enabled)
+            .map(|package| package.name.clone())
+            .collect();
+        enabled.sort_by_key(|name| name.to_lowercase());
+        for name in enabled {
+            let same = |package: &str| package.eq_ignore_ascii_case(&name);
+            if self.clones.iter().any(|clone| same(&clone.package))
+                || self
+                    .checkouts
+                    .iter()
+                    .any(|checkout| same(&checkout.package))
+            {
+                return true;
+            }
+            if self
+                .downloads
+                .iter()
+                .any(|download| same(&download.package))
+            {
+                continue;
+            }
+            let Some(plugin) = self.workspace.plugin(&name) else {
+                continue;
+            };
+            if self.workspace.install_kind(&name) == Some(InstallKind::Prebuilt) {
+                continue;
+            }
+            if plugin.has_modules() && !prebuilt::has_editor_binaries(&plugin.dir) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1137,8 +1350,20 @@ pub fn normalize_changes(changes: &[Change]) -> Vec<Change> {
     result
 }
 
-/// Plans `changes` against the workspace.
+/// Plans `changes` against the workspace, assuming a C++ compiler is installed.
 pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -> PreparedPlan {
+    plan_with(workspace, changes, options, &|| true)
+}
+
+/// Plans `changes` against the workspace. `compiler_found` (Visual Studio 2022, SPEC §7
+/// `check_environment`) is asked only when the plan has a build step; without one the plan warns
+/// `plan.noCompiler`.
+pub fn plan_with(
+    workspace: &Workspace,
+    changes: &[Change],
+    options: &ApplyOptions,
+    compiler_found: &dyn Fn() -> bool,
+) -> PreparedPlan {
     let changes = normalize_changes(changes);
     let Some(context) = workspace.project.as_ref() else {
         let errors = if changes.is_empty() {
@@ -1199,17 +1424,24 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
                     continue;
                 }
                 planner.install(name, change.version.as_deref(), None, None);
-                if let Some(clone) = planner
+                let installed = planner
                     .clones
                     .iter()
-                    .find(|clone| clone.package.eq_ignore_ascii_case(name))
-                {
+                    .map(|clone| (&clone.package, &clone.version))
+                    .chain(
+                        planner
+                            .downloads
+                            .iter()
+                            .map(|download| (&download.package, &download.version)),
+                    )
+                    .find(|(package, _)| package.eq_ignore_ascii_case(name));
+                if let Some((package, version)) = installed {
                     if let Some(entry) = resolved_changes
                         .iter_mut()
                         .find(|c| c.package.eq_ignore_ascii_case(name))
                     {
-                        entry.package = clone.package.clone();
-                        entry.version = Some(clone.version.clone());
+                        entry.package = package.clone();
+                        entry.version = Some(version.clone());
                     }
                 }
             }
@@ -1299,6 +1531,40 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
                 },
             ));
         }
+        if let Some(download) = planner
+            .downloads
+            .iter()
+            .find(|download| download.package.eq_ignore_ascii_case(&name))
+        {
+            steps.push((
+                StepGroup::Download,
+                StepKind::Download,
+                msg(
+                    "step.download",
+                    &[
+                        ("package", &download.package),
+                        ("version", &download.version),
+                    ],
+                ),
+                msg(
+                    "step.download.detail",
+                    &[
+                        ("source", &display_download_source(&download.binary.url)),
+                        ("dest", &project.location(&download.dest)),
+                    ],
+                ),
+                StepAction::Download {
+                    package: download.package.clone(),
+                    version: download.version.clone(),
+                    url: download.binary.url.clone(),
+                    sha256: download.binary.sha256.clone(),
+                    size: download.binary.size,
+                    engine: download.engine.clone(),
+                    dest: download.dest.clone(),
+                    replace: download.replace,
+                },
+            ));
+        }
     }
 
     let detail_for = |required_by: &Option<String>| match required_by {
@@ -1367,10 +1633,14 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
         ));
     }
 
-    let needs_build = !planner.clones.is_empty()
+    // Something new is going to be loaded by the editor; whether that needs a C++ build depends
+    // on where its code comes from.
+    let touches_code = !planner.clones.is_empty()
         || !planner.checkouts.is_empty()
+        || !planner.downloads.is_empty()
         || !planner.enables.is_empty()
         || !planner.engine_enables.is_empty();
+    let needs_build = touches_code && planner.source_build_needed();
     let editor_running = context.editor.running;
     let engine_root = engine.as_ref().map(|engine| PathBuf::from(&engine.root));
     let wants_engine = needs_build && (options.build || options.run_tests);
@@ -1387,6 +1657,13 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
                 .clones
                 .iter()
                 .map(|clone| clone.dest.clone())
+                .chain(
+                    planner
+                        .downloads
+                        .iter()
+                        .filter(|download| !download.replace)
+                        .map(|download| download.dest.clone()),
+                )
                 .collect();
             let target = project.build_target_with(&new_plugin_dirs);
             // The build goes through cmd.exe and Build.bat: refuse what those would misread
@@ -1420,12 +1697,16 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
                     uproject: project.path.clone(),
                 },
             ));
+            if !compiler_found() {
+                planner.warning(msg0("plan.noCompiler"));
+            }
         }
         let mut tested: Vec<String> = planner.clones.iter().map(|c| c.package.clone()).collect();
         for name in planner
             .checkouts
             .iter()
             .map(|c| c.package.clone())
+            .chain(planner.downloads.iter().map(|d| d.package.clone()))
             .chain(planner.enables.iter().map(|(name, _)| name.clone()))
         {
             if !tested
@@ -1492,6 +1773,12 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
     let mut actions = Vec::with_capacity(steps.len());
     for (position, (group, kind, title, detail, action)) in steps.into_iter().enumerate() {
         let n = position as u32 + 1;
+        // A new folder does not disturb a running editor; replacing one it may have loaded does.
+        let needs_editor_closed = match &action {
+            StepAction::Clone { .. } => false,
+            StepAction::Download { replace, .. } => *replace,
+            _ => true,
+        };
         plan_steps.push(PlanStep {
             id: format!("s{n}"),
             n,
@@ -1499,7 +1786,7 @@ pub fn plan(workspace: &Workspace, changes: &[Change], options: &ApplyOptions) -
             kind,
             title,
             detail,
-            needs_editor_closed: kind != StepKind::Clone,
+            needs_editor_closed,
         });
         actions.push(action);
     }
@@ -1783,8 +2070,29 @@ mod tests {
             &[change(ChangeKind::Update, "UBotCore", Some("0.2.0"))],
             &options(false),
         );
-        assert!(texts(&prepared.plan.errors)
-            .contains(&"UBotCore is not a git checkout; reinstall it to update.".to_string()));
+        assert!(
+            texts(&prepared.plan.errors).contains(
+                &"No prebuilt UBotCore 0.2.0 for UE 5.5; uninstall it and install it again to build from source."
+                    .to_string()
+            ),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
+        // With the setting off the answer is the same: uninstall and install again.
+        workspace.settings.install.use_prebuilt = false;
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Update, "UBotCore", Some("0.2.0"))],
+            &options(false),
+        );
+        assert!(
+            texts(&prepared.plan.errors).contains(
+                &"No prebuilt UBotCore 0.2.0 for UE 5.5; uninstall it and install it again to build from source."
+                    .to_string()
+            ),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
         let prepared = plan(
             &workspace,
             &[change(ChangeKind::Update, "UBotROS", Some("0.1.0"))],
@@ -2493,6 +2801,478 @@ mod tests {
         let workspace = named_project(dir.path(), "p4", "Evil&mkdir PWNED&x", true);
         let prepared = plan(&workspace, &install, &options(false));
         assert!(prepared.plan.errors.is_empty());
+    }
+
+    use crate::workspace::tests::{mark_prebuilt, prebuilt_workspace, BINARY_SHA};
+
+    fn kinds(plan: &Plan) -> Vec<StepKind> {
+        plan.steps.iter().map(|step| step.kind).collect()
+    }
+
+    #[test]
+    fn installs_prebuilt_binaries_without_a_build() {
+        let dir = tempfile::tempdir().unwrap();
+        // UBotROS 0.1.0 has binaries for UE 5.5; its dependencies are installed (UBotSensor
+        // disabled) and have no binaries on disk, but they need no build unless they are
+        // enabled by the plan... which UBotSensor is.
+        let workspace = prebuilt_workspace(dir.path(), true);
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &ApplyOptions {
+                build: true,
+                reopen_editor: true,
+                run_tests: true,
+            },
+        );
+        let result = &prepared.plan;
+        assert!(result.errors.is_empty(), "{:?}", texts(&result.errors));
+        // UBotCore and UBotSensor are source installs without editor binaries: a build.
+        assert_eq!(
+            titles(result),
+            [
+                "Download UBotROS 0.1.0",
+                "Enable UBotROS",
+                "Build UnrealEditor",
+                "Run package tests",
+                "Reopen Unreal Editor"
+            ]
+        );
+        assert_eq!(result.steps[0].group, StepGroup::Download);
+        assert_eq!(result.steps[0].kind, StepKind::Download);
+        assert!(
+            !result.steps[0].needs_editor_closed,
+            "a new folder does not disturb the editor"
+        );
+        assert_eq!(
+            render_en(&result.steps[0].detail),
+            "example.com/UBotROS-0.1.0-UE5.5-Win64.zip → Plugins/uBot/uBotROS"
+        );
+        assert_eq!(
+            result.changes,
+            [change(ChangeKind::Install, "UBotROS", Some("0.1.0"))]
+        );
+        assert!(result.warnings.is_empty(), "{:?}", texts(&result.warnings));
+        match &prepared.actions[0] {
+            StepAction::Download {
+                package,
+                version,
+                url,
+                sha256,
+                size,
+                engine,
+                dest,
+                replace,
+            } => {
+                assert_eq!(package, "UBotROS");
+                assert_eq!(version, "0.1.0");
+                assert_eq!(url, "https://example.com/UBotROS-0.1.0-UE5.5-Win64.zip");
+                assert_eq!(sha256, BINARY_SHA);
+                assert_eq!(*size, Some(1234));
+                assert_eq!(engine, "5.5");
+                assert!(dest.ends_with("Plugins/uBot/uBotROS"));
+                assert!(!replace);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(render_en(&result.steps[3].detail), "UBotROS");
+
+        // Once the source packages have their binaries, nothing needs a build.
+        for folder in ["uBotCore", "uBotSensor", "uBotEnvironment"] {
+            let win64 = dir
+                .path()
+                .join("MyRobotSim/Plugins/uBot")
+                .join(folder)
+                .join("Binaries/Win64");
+            std::fs::create_dir_all(&win64).unwrap();
+            std::fs::write(win64.join(format!("UnrealEditor-{folder}.dll")), "dll").unwrap();
+        }
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &ApplyOptions {
+                build: true,
+                reopen_editor: true,
+                run_tests: false,
+            },
+        );
+        assert_eq!(
+            titles(&prepared.plan),
+            ["Download UBotROS 0.1.0", "Enable UBotROS"],
+            "no build step, so no reopen either"
+        );
+        assert!(!prepared.plan.needs_build);
+        // The editor is running: it is reopened, and the download still needs no build.
+        let mut running = workspace.clone();
+        running.project.as_mut().unwrap().editor.running = true;
+        let prepared = plan(
+            &running,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &ApplyOptions {
+                build: true,
+                reopen_editor: true,
+                run_tests: true,
+            },
+        );
+        assert_eq!(
+            kinds(&prepared.plan),
+            [
+                StepKind::Download,
+                StepKind::EnablePackage,
+                StepKind::RunTests,
+                StepKind::OpenEditor
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mixed_plan_builds_the_packages_that_come_from_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), true);
+        for folder in ["uBotCore", "uBotSensor", "uBotEnvironment"] {
+            let win64 = dir
+                .path()
+                .join("MyRobotSim/Plugins/uBot")
+                .join(folder)
+                .join("Binaries/Win64");
+            std::fs::create_dir_all(&win64).unwrap();
+            std::fs::write(win64.join("UnrealEditor-X.dll"), "dll").unwrap();
+        }
+        // UBotROS has binaries, UBotSensor 0.1.0 (here: a fresh install) has none.
+        std::fs::remove_dir_all(dir.path().join("MyRobotSim/Plugins/uBot/uBotSensor")).unwrap();
+        workspace.project.as_mut().unwrap().git.remove("ubotsensor");
+        workspace
+            .project
+            .as_mut()
+            .unwrap()
+            .project
+            .reload()
+            .unwrap();
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &options(true),
+        );
+        let result = &prepared.plan;
+        assert!(result.errors.is_empty(), "{:?}", texts(&result.errors));
+        assert_eq!(
+            titles(result),
+            [
+                "Clone UBotSensor 0.1.0",
+                "Download UBotROS 0.1.0",
+                "Enable UBotSensor",
+                "Enable UBotROS",
+                "Build UnrealEditor"
+            ]
+        );
+        assert!(result.needs_build);
+        assert_eq!(
+            texts(&result.warnings),
+            ["No prebuilt UBotSensor 0.1.0 for UE 5.5; it will be built from source."]
+        );
+
+        // Without a compiler the build is still planned, with a warning.
+        let prepared = plan_with(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &options(true),
+            &|| false,
+        );
+        assert!(texts(&prepared.plan.warnings)
+            .contains(&"A C++ build is needed, but Visual Studio 2022 was not found.".to_string()));
+        // Not asked when nothing is built.
+        let asked = std::cell::Cell::new(false);
+        let prepared = plan_with(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotROS", None)],
+            &options(false),
+            &|| {
+                asked.set(true);
+                false
+            },
+        );
+        assert!(!asked.get());
+        assert!(!texts(&prepared.plan.warnings)
+            .iter()
+            .any(|warning| warning.contains("Visual Studio")));
+    }
+
+    #[test]
+    fn prebuilt_binaries_need_use_prebuilt_and_a_launcher_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = prebuilt_workspace(dir.path(), true);
+        let first_kind = |workspace: &Workspace| {
+            let prepared = plan(
+                workspace,
+                &[change(ChangeKind::Install, "UBotROS", None)],
+                &options(false),
+            );
+            (kinds(&prepared.plan)[0], texts(&prepared.plan.warnings))
+        };
+        assert_eq!(first_kind(&workspace).0, StepKind::Download);
+
+        let mut off = workspace.clone();
+        off.settings.install.use_prebuilt = false;
+        assert_eq!(first_kind(&off), (StepKind::Clone, vec![]));
+
+        for kind in [
+            crate::model::EngineKind::Source,
+            crate::model::EngineKind::Custom,
+        ] {
+            let mut source = workspace.clone();
+            source
+                .project
+                .as_mut()
+                .unwrap()
+                .engine
+                .as_mut()
+                .unwrap()
+                .kind = kind;
+            assert_eq!(first_kind(&source), (StepKind::Clone, vec![]), "{kind:?}");
+        }
+
+        // A launcher engine without binaries for its version: cloned, with a warning.
+        let mut other = workspace.clone();
+        other
+            .project
+            .as_mut()
+            .unwrap()
+            .engine
+            .as_mut()
+            .unwrap()
+            .version = "5.6.1".into();
+        assert_eq!(
+            first_kind(&other),
+            (
+                StepKind::Clone,
+                vec!["No prebuilt UBotROS 0.1.0 for UE 5.6; it will be built from source.".into()]
+            )
+        );
+    }
+
+    #[test]
+    fn updates_keep_git_checkouts_and_replace_prebuilt_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        // UBotSensor disabled, so that UBotCore may move to 0.2.0.
+        let mut workspace = prebuilt_workspace(dir.path(), false);
+        let update_core = [change(ChangeKind::Update, "UBotCore", Some("0.2.0"))];
+
+        // A git checkout is checked out, although 0.2.0 has binaries.
+        let prepared = plan(&workspace, &update_core, &options(true));
+        assert!(
+            prepared.plan.errors.is_empty(),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
+        assert_eq!(
+            titles(&prepared.plan),
+            ["Check out UBotCore 0.2.0", "Build UnrealEditor"]
+        );
+
+        // A prebuilt install is replaced by the new binaries; nothing to build.
+        for folder in ["uBotSensor", "uBotEnvironment"] {
+            let win64 = dir
+                .path()
+                .join("MyRobotSim/Plugins/uBot")
+                .join(folder)
+                .join("Binaries/Win64");
+            std::fs::create_dir_all(&win64).unwrap();
+            std::fs::write(win64.join("UnrealEditor-X.dll"), "dll").unwrap();
+        }
+        mark_prebuilt(&mut workspace, "UBotCore", "5.5");
+        let prepared = plan(&workspace, &update_core, &options(true));
+        assert!(
+            prepared.plan.errors.is_empty(),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
+        assert_eq!(titles(&prepared.plan), ["Download UBotCore 0.2.0"]);
+        assert!(!prepared.plan.needs_build);
+        assert!(
+            prepared.plan.steps[0].needs_editor_closed,
+            "the editor may have the old binaries loaded"
+        );
+        assert_eq!(
+            render_en(&prepared.plan.steps[0].detail),
+            "example.com/UBotCore-0.2.0-UE5.5-Win64.zip → Plugins/uBot/uBotCore"
+        );
+        assert!(matches!(
+            &prepared.actions[0],
+            StepAction::Download { replace: true, dest, .. } if dest.ends_with("Plugins/uBot/uBotCore")
+        ));
+
+        // A folder that is neither (copied in) is replaced the same way.
+        let marker = dir
+            .path()
+            .join("MyRobotSim/Plugins/uBot/uBotCore")
+            .join(crate::prebuilt::MARKER_FILE);
+        std::fs::remove_file(&marker).unwrap();
+        workspace
+            .project
+            .as_mut()
+            .unwrap()
+            .project
+            .reload()
+            .unwrap();
+        assert_eq!(
+            workspace.install_kind("UBotCore"),
+            Some(crate::model::InstallKind::Other)
+        );
+        let prepared = plan(&workspace, &update_core, &options(true));
+        assert_eq!(titles(&prepared.plan), ["Download UBotCore 0.2.0"]);
+
+        // Without binaries for the target version: uninstall and install again. (An update to
+        // the version it has is a reinstall, and 0.1.0 has no binaries.)
+        mark_prebuilt(&mut workspace, "UBotCore", "5.5");
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Update, "UBotCore", Some("0.1.0"))],
+            &options(true),
+        );
+        assert!(prepared.plan.steps.is_empty());
+        assert_eq!(
+            texts(&prepared.plan.errors),
+            ["No prebuilt UBotCore 0.1.0 for UE 5.5; uninstall it and install it again to build from source."]
+        );
+        let mut moved = workspace.clone();
+        moved
+            .project
+            .as_mut()
+            .unwrap()
+            .engine
+            .as_mut()
+            .unwrap()
+            .version = "5.6.0".into();
+        let prepared = plan(&moved, &update_core, &options(true));
+        assert_eq!(
+            texts(&prepared.plan.errors),
+            ["No prebuilt UBotCore 0.2.0 for UE 5.6; uninstall it and install it again to build from source."]
+        );
+        assert!(prepared.actions.is_empty());
+    }
+
+    #[test]
+    fn a_prebuilt_install_can_be_reinstalled_at_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), true);
+        // UBotROS 0.1.0 installed prebuilt for UE 5.4; the project uses 5.5.
+        crate::workspace::tests::write(
+            &dir.path()
+                .join("MyRobotSim/Plugins/uBot/uBotROS/UBotROS.uplugin"),
+            &crate::workspace::tests::descriptor(
+                "0.1.0",
+                "Adapter",
+                &[("UBotCore", "^0.1.0"), ("UBotSensor", "^0.1.0")],
+                &[],
+            ),
+        );
+        workspace
+            .project
+            .as_mut()
+            .unwrap()
+            .project
+            .reload()
+            .unwrap();
+        mark_prebuilt(&mut workspace, "UBotROS", "5.4");
+        for folder in ["uBotCore", "uBotSensor", "uBotEnvironment"] {
+            let win64 = dir
+                .path()
+                .join("MyRobotSim/Plugins/uBot")
+                .join(folder)
+                .join("Binaries/Win64");
+            std::fs::create_dir_all(&win64).unwrap();
+            std::fs::write(win64.join("UnrealEditor-X.dll"), "dll").unwrap();
+        }
+
+        // fix.reinstall: an update to the installed version downloads it again.
+        let reinstall = [change(ChangeKind::Update, "UBotROS", Some("0.1.0"))];
+        let prepared = plan(&workspace, &reinstall, &options(true));
+        assert!(
+            prepared.plan.errors.is_empty(),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
+        assert_eq!(titles(&prepared.plan), ["Download UBotROS 0.1.0"]);
+        assert!(matches!(
+            &prepared.actions[0],
+            StepAction::Download { replace: true, engine, .. } if engine == "5.5"
+        ));
+
+        // Without binaries for this engine it cannot be reinstalled prebuilt.
+        let mut moved = workspace.clone();
+        moved
+            .project
+            .as_mut()
+            .unwrap()
+            .engine
+            .as_mut()
+            .unwrap()
+            .version = "5.6.0".into();
+        let prepared = plan(&moved, &reinstall, &options(true));
+        assert_eq!(
+            texts(&prepared.plan.errors),
+            ["No prebuilt UBotROS 0.1.0 for UE 5.6; uninstall it and install it again to build from source."]
+        );
+
+        // A git checkout at its version: nothing to do, as before.
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Update, "UBotCore", Some("0.1.0"))],
+            &options(true),
+        );
+        assert!(prepared.plan.steps.is_empty() && prepared.plan.errors.is_empty());
+    }
+
+    #[test]
+    fn a_dependency_installed_by_the_plan_follows_the_version_it_ends_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = prebuilt_workspace(dir.path(), true);
+        // UBotCore is not installed: installing UBotSensor installs it, and a later change to
+        // 0.2.0 (which has binaries) turns the clone into a download.
+        std::fs::remove_dir_all(dir.path().join("MyRobotSim/Plugins/uBot/uBotCore")).unwrap();
+        std::fs::remove_dir_all(dir.path().join("MyRobotSim/Plugins/uBot/uBotSensor")).unwrap();
+        std::fs::remove_dir_all(dir.path().join("MyRobotSim/Plugins/uBot/uBotEnvironment"))
+            .unwrap();
+        let context = workspace.project.as_mut().unwrap();
+        context.git.clear();
+        context.project.reload().unwrap();
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotCore", None)],
+            &options(false),
+        );
+        assert_eq!(
+            titles(&prepared.plan),
+            ["Download UBotCore 0.2.0", "Enable UBotCore"]
+        );
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotCore", Some("0.1.0"))],
+            &options(false),
+        );
+        assert_eq!(
+            titles(&prepared.plan),
+            ["Clone UBotCore 0.1.0", "Enable UBotCore"]
+        );
+        assert_eq!(
+            texts(&prepared.plan.warnings),
+            ["No prebuilt UBotCore 0.1.0 for UE 5.5; it will be built from source."]
+        );
+        // UBotSensor needs ^0.1.0: the core it installs is cloned.
+        let prepared = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotSensor", None)],
+            &options(false),
+        );
+        assert_eq!(
+            titles(&prepared.plan),
+            [
+                "Clone UBotCore 0.1.0",
+                "Clone UBotSensor 0.1.0",
+                "Enable UBotCore",
+                "Enable UBotSensor"
+            ]
+        );
     }
 
     #[test]

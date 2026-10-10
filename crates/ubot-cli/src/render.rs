@@ -4,8 +4,9 @@ use std::fmt::Write as _;
 
 use ubot_core::index::MergedIndex;
 use ubot_core::model::{
-    EngineInfo, EngineKind, FixAction, IndexSourceStatus, PackageInfo, PackageState, Plan, Problem,
-    Recipe, RequirementKind, RequirementStatus, Snapshot, StepGroup, StepStatus, Task,
+    EngineInfo, EngineKind, FixAction, IndexSourceStatus, InstallKind, PackageInfo, PackageState,
+    Plan, Problem, Recipe, RequirementKind, RequirementStatus, Snapshot, StepGroup, StepStatus,
+    Task,
 };
 use ubot_core::msg::render_en;
 
@@ -53,17 +54,24 @@ fn engine_kind(kind: EngineKind) -> &'static str {
     }
 }
 
-fn git_text(package: &PackageInfo) -> String {
-    match &package.git {
-        Some(git) if git.is_checkout => {
-            let mut text = git.git_ref.clone().unwrap_or_else(|| "?".into());
+/// Where an installed package came from: "git v0.1.0", "prebuilt UE 5.5" (the engine its marker
+/// names, which can differ from the project's), "local folder".
+fn source_text(package: &PackageInfo) -> String {
+    match (package.install_kind, &package.git) {
+        (Some(InstallKind::Git), Some(git)) => {
+            let mut text = format!("git {}", git.git_ref.clone().unwrap_or_else(|| "?".into()));
             if git.dirty {
                 text.push_str(" (modified)");
             }
             text
         }
-        Some(_) => "not a git checkout".into(),
-        None => String::new(),
+        (Some(InstallKind::Git), None) => "git".into(),
+        (Some(InstallKind::Prebuilt), _) => match &package.prebuilt {
+            Some(built) => format!("prebuilt UE {}", built.engine),
+            None => "prebuilt".into(),
+        },
+        (Some(InstallKind::Other), _) => "local folder".into(),
+        (None, _) => String::new(),
     }
 }
 
@@ -121,7 +129,7 @@ pub fn status(snapshot: &Snapshot, show_planned: bool) -> String {
         "INSTALLED".into(),
         "LATEST".into(),
         "LOCATION".into(),
-        "GIT".into(),
+        "FROM".into(),
     ]];
     for package in snapshot
         .packages
@@ -145,7 +153,7 @@ pub fn status(snapshot: &Snapshot, show_planned: bool) -> String {
                 .unwrap_or_else(|| "-".into()),
             latest,
             package.location.clone().unwrap_or_else(|| "-".into()),
-            git_text(package),
+            source_text(package),
         ]);
     }
     out.push_str(&table(&rows, "  "));
@@ -363,14 +371,22 @@ pub fn package(package: &PackageInfo, problems: &[Problem]) -> String {
         vec!["Versions".into(), join(&package.versions)],
         vec!["Planned".into(), optional(&package.planned_version)],
         vec!["Location".into(), optional(&package.location)],
-        vec!["Git".into(), {
-            let git = git_text(package);
-            if git.is_empty() {
+        vec!["Installed from".into(), {
+            let source = source_text(package);
+            if source.is_empty() {
                 "-".into()
             } else {
-                git
+                source
             }
         }],
+        vec![
+            "Prebuilt".into(),
+            if package.prebuilt_available {
+                "available for this project".into()
+            } else {
+                "-".into()
+            },
+        ],
         vec!["Repository".into(), optional(&package.repository)],
         vec!["Web".into(), optional(&package.web_url)],
         vec!["Docs".into(), optional(&package.docs_url)],
