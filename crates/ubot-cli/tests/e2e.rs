@@ -135,6 +135,59 @@ fn problem_ids(problems: &Value) -> Vec<String> {
 
 const ORIGINAL_UPROJECT: &str = "{\r\n\t\"FileVersion\": 3,\r\n\t\"EngineAssociation\": \"5.5\",\r\n\t\"Category\": \"\",\r\n\t\"Description\": \"\",\r\n\t\"Plugins\": [\r\n\t\t{\r\n\t\t\t\"Name\": \"ModelingToolsEditorMode\",\r\n\t\t\t\"Enabled\": true,\r\n\t\t\t\"TargetAllowList\": [\r\n\t\t\t\t\"Editor\"\r\n\t\t\t]\r\n\t\t}\r\n\t]\r\n}\r\n";
 
+/// `text` (the contents of a `.uplugin`) with its `VersionName` value replaced by `version`.
+fn with_version_name(text: &str, version: &str) -> String {
+    const KEY: &str = "\"VersionName\"";
+    let after_key = text.find(KEY).expect("the descriptor has a VersionName") + KEY.len();
+    let open = after_key
+        + text[after_key..]
+            .find('"')
+            .expect("VersionName has a value")
+        + 1;
+    let close = open + text[open..].find('"').expect("VersionName value ends");
+    format!("{}{version}{}", &text[..open], &text[close..])
+}
+
+/// Makes `v{version}` a release in the bare copy `remotes/{folder}.git`: a commit on top of its
+/// branch whose `{name}.uplugin` says `version` (no commit when it already does), tagged
+/// `v{version}`. The commit is made in a temporary working clone.
+fn release(root: &Path, remotes: &Path, name: &str, folder: &str, version: &str) {
+    let bare = remotes.join(format!("{folder}.git"));
+    let work = root.join(format!("work-{folder}-{version}"));
+    let output = Command::new("git")
+        .args(["clone", "--quiet", "--"])
+        .arg(&bare)
+        .arg(&work)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let descriptor = work.join(format!("{name}.uplugin"));
+    let text = fs::read_to_string(&descriptor).unwrap();
+    let released = with_version_name(&text, version);
+    if released != text {
+        fs::write(&descriptor, released).unwrap();
+        git(
+            &work,
+            &[
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "-am",
+                &format!("Release {version}"),
+            ],
+        );
+        let branch = git(&work, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git(&work, &["push", "--quiet", "origin", &branch]);
+    }
+    // The bare copy's HEAD is its branch, which now carries the release.
+    git(&bare, &["tag", "-f", &format!("v{version}"), "HEAD"]);
+}
+
 fn setup() -> Option<(tempfile::TempDir, Env)> {
     let plugins = plugins_dir();
     if REPOS
@@ -161,7 +214,7 @@ fn setup() -> Option<(tempfile::TempDir, Env)> {
     let remotes = root.join("remotes");
     fs::create_dir_all(&remotes).unwrap();
 
-    for (_, folder) in REPOS {
+    for (name, folder) in REPOS {
         let bare = remotes.join(format!("{folder}.git"));
         let source = plugins.join(folder);
         let output = Command::new("git")
@@ -176,41 +229,13 @@ fn setup() -> Option<(tempfile::TempDir, Env)> {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        // The real repositories may carry a v0.1.0 tag already; the copy's is moved to HEAD.
-        git(&bare, &["tag", "-f", "v0.1.0", "HEAD"]);
+        // Whatever version the real repository's HEAD carries, the copy's v0.1.0 is a commit whose
+        // descriptor says 0.1.0 (a v0.1.0 tag the real repository already has is moved to it).
+        release(&root, &remotes, name, folder, "0.1.0");
     }
 
-    // UBotCore 0.2.0: a commit that bumps VersionName, made in a temporary working clone.
-    let work = root.join("work-core");
-    let output = Command::new("git")
-        .args(["clone", "--quiet", "--"])
-        .arg(remotes.join("uBotCore.git"))
-        .arg(&work)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let descriptor = work.join("UBotCore.uplugin");
-    let text = fs::read_to_string(&descriptor).unwrap();
-    assert!(
-        text.contains("\"VersionName\": \"0.1.0\""),
-        "UBotCore.uplugin is at 0.1.0"
-    );
-    fs::write(
-        &descriptor,
-        text.replace("\"VersionName\": \"0.1.0\"", "\"VersionName\": \"0.2.0\""),
-    )
-    .unwrap();
-    git(
-        &work,
-        &["commit", "--quiet", "--no-verify", "-am", "Release 0.2.0"],
-    );
-    git(&work, &["tag", "v0.2.0"]);
-    let branch = git(&work, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    git(&work, &["push", "--quiet", "origin", &branch, "v0.2.0"]);
+    // UBotCore 0.2.0: one more commit on top, which bumps VersionName.
+    release(&root, &remotes, "UBotCore", "uBotCore", "0.2.0");
 
     let repo = |folder: &str| {
         remotes

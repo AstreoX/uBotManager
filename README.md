@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/ubot-mark-light.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/brand/ubot-mark-dark.svg">
+  <img alt="uBot" src="docs/brand/ubot-mark-dark.svg" height="96">
+</picture>
+
 # uBot Manager
 
 uBot 家族的 Package 管理器：一个 Windows 桌面程序，在 UE 5.5 工程里安装、更新、启用、禁用和卸载 uBot Package，处理它们之间的依赖，并在需要时编译工程。同一套核心也提供命令行 `ubot`，用于脚本和 CI。

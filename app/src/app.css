@@ -70,13 +70,13 @@ input[type="checkbox"], input[type="radio"] { margin: 0; accent-color: var(--acc
   height: 22px;
   border-radius: 5px;
   background: var(--logo);
-  color: #ffffff;
-  font-size: 11px;
-  font-weight: 600;
+  color: var(--logo-mark);
   display: flex;
   align-items: center;
   justify-content: center;
 }
+/* No pointer events, so a press on the mark lands on the badge, which is a drag region. */
+.logo svg { display: block; width: 78%; height: auto; pointer-events: none; }
 
 .app-name { font-weight: 600; }
 

@@ -6,7 +6,7 @@ import { changeText, problemCounts, sameName } from "../lib/format";
 import { activeTask, canSwitchProject, taskProgress } from "../lib/tasks";
 import { packageProblems, useApp } from "../state";
 import {
-  CloseGlyph, CloseIcon, ErrorIcon, GearIcon, GraphIcon, MaximizeGlyph, MinimizeGlyph, PackageIcon, RecipeIcon,
+  CloseGlyph, CloseIcon, ErrorIcon, GearIcon, GraphIcon, LogoMark, MaximizeGlyph, MinimizeGlyph, PackageIcon, RecipeIcon,
   RefreshIcon, RestoreGlyph, SpinnerIcon, TasksIcon, WarningIcon, ArrowUpIcon
 } from "./Icons";
 import type { MenuEntry } from "./Menu";
@@ -35,7 +35,7 @@ export function TitleBar() {
   const spinning = state.refreshing || state.snapshot.syncing;
   return (
     <header className="titlebar" data-tauri-drag-region="">
-      <span className="logo" data-tauri-drag-region="">uB</span>
+      <span className="logo" aria-hidden="true" data-tauri-drag-region=""><LogoMark /></span>
       <span className="app-name" data-tauri-drag-region="">{t("app.name")}</span>
       <span className="spacer" data-tauri-drag-region="" />
       <button type="button" className="header-button" onClick={actions.openRecipes}>

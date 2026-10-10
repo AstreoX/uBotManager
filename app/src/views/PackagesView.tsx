@@ -276,7 +276,7 @@ function PackageDetails({ pkg }: { pkg: PackageInfo }) {
               {!isInstalled(pkg) && pkg.prebuiltAvailable && <span className="field-note">{t("details.prebuiltNote")}</span>}
             </dd>
             <dt>{t("details.location")}</dt><dd className="mono">{pkg.location ?? "—"}</dd>
-            <dt>{t("details.installedFrom")}</dt><dd>{installedFrom ?? "—"}</dd>
+            <dt>{t("details.installedFrom")}</dt><dd className={installedFrom ? undefined : "mono"}>{installedFrom ?? "—"}</dd>
             <dt>{t("details.repository")}</dt>
             <dd>
               {pkg.webUrl ? (
