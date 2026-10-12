@@ -1,0 +1,195 @@
+# Builds the uBot Manager installer on a GitHub-hosted Windows runner, so every released binary comes
+# from the source in this repository (SignPath requires this for its free open source certificate).
+#
+#   pull request that changes this file, or a manual run: test, build, upload the installer as an artifact
+#   tag vX.Y.Z: the same, then a draft release with the installer and its .sha256; publish it by hand
+#
+# Signing starts once SignPath is set up: the repository variables SIGNPATH_ORGANIZATION_ID,
+# SIGNPATH_PROJECT_SLUG and SIGNPATH_SIGNING_POLICY_SLUG, and the secret SIGNPATH_API_TOKEN. Then
+# ubot-manager.exe is signed before it goes into the installer, and the installer after it. Each signing
+# request waits for an approver in SignPath. See "Code signing policy" in README.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write # the draft release of a tag
+      actions: read # SignPath downloads the uploaded artifacts
+    env:
+      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      CARGO_TERM_COLOR: never
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Read the version
+        id: version
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $package = (Get-Content app/package.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($package -ne $version -or $cargo -ne $version) {
+            throw "Versions differ: tauri.conf.json $version, app/package.json $package, Cargo.toml $cargo"
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The tag $env:GITHUB_REF_NAME does not match the version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Install the frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Test the frontend
+        working-directory: app
+        run: npm test
+
+      # Builds app/dist, ubot-manager.exe and an unsigned installer. Bundling writes the bundle type into
+      # ubot-manager.exe, so the exe is signed only after this step.
+      - name: Build
+        working-directory: app
+        run: npm run tauri build
+
+      - name: Test the Rust crates
+        run: cargo test --workspace --locked
+
+      - name: Upload ubot-manager.exe for signing
+        id: unsigned-exe
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-exe
+          path: target/release/ubot-manager.exe
+          if-no-files-found: error
+
+      - name: Sign ubot-manager.exe
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/exe
+
+      # A second bundle run leaves the already marked exe unchanged; the check below makes sure of it.
+      - name: Bundle the signed ubot-manager.exe
+        if: env.SIGN == 'true'
+        run: |
+          Copy-Item signed/exe/ubot-manager.exe target/release/ubot-manager.exe -Force
+          Push-Location app
+          npm run tauri bundle -- --bundles nsis
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Pop-Location
+          $signature = Get-AuthenticodeSignature target/release/ubot-manager.exe
+          if ($signature.Status -ne 'Valid') { throw "ubot-manager.exe is not validly signed after bundling: $($signature.Status)" }
+
+      - name: Collect the installer
+        id: installer
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $name = "uBot-Manager_${version}_x64-setup.exe"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "target/release/bundle/nsis/uBot Manager_${version}_x64-setup.exe" "out/$name"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload the installer for signing
+        id: unsigned-installer
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installer
+          path: out/${{ steps.installer.outputs.name }}
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/installer
+
+      - name: Take the signed installer
+        if: env.SIGN == 'true'
+        run: |
+          $name = '${{ steps.installer.outputs.name }}'
+          Copy-Item "signed/installer/$name" "out/$name" -Force
+          $signature = Get-AuthenticodeSignature "out/$name"
+          if ($signature.Status -ne 'Valid') { throw "$name is not validly signed: $($signature.Status)" }
+
+      - name: Write the checksum
+        run: |
+          $name = '${{ steps.installer.outputs.name }}'
+          $hash = (Get-FileHash "out/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText("$PWD/out/$name.sha256", "$hash *$name`n")
+          Get-Content "out/$name.sha256"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: uBot-Manager-${{ steps.version.outputs.version }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Create a draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $name = '${{ steps.installer.outputs.name }}'
+          $signed = if ($env:SIGN -eq 'true') { '安装包已签名' } else { '安装包未签名，首次运行时 Windows SmartScreen 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」' }
+          $notes = @(
+            "下载 ``$name`` 安装（按当前用户安装，可选安装目录）。$signed。",
+            '',
+            "核对下载：``(Get-FileHash .\$name -Algorithm SHA256).Hash`` 应与 ``$name.sha256`` 里的值一致。",
+            '',
+            "Code signing policy: https://github.com/${{ github.repository }}#code-signing-policy"
+          ) -join "`n"
+          gh release create $env:GITHUB_REF_NAME "out/$name" "out/$name.sha256" --draft --verify-tag --title "uBot Manager $version" --notes $notes

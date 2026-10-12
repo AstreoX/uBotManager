@@ -445,7 +445,7 @@ cargo build --release -p ubot-cli      # 生成 target\release\ubot.exe
 
 - `npm run tauri build` 由 Tauri CLI 驱动：先运行 `npm run check-index` 检查内置索引副本是否最新，不一致就失败（在仓库根目录运行 `node scripts/sync-index.mjs` 更新）；通过后运行 `npm run build` 生成 `app/dist`，再编译外壳并把前端嵌入。不要直接用 `cargo build` 构建 `ubot-manager`，那样得到的是开发构建，会去加载 `http://localhost:5173`。
 - 未用 `--from` 或 `UBOTCORE_INDEX` 指定源、且工作区里的 uBotCore 索引读不到时，构建检查会从 GitHub 上的 uBotCore 比较。离线构建可设 `UBOT_SKIP_INDEX_CHECK=1` 跳过检查。
-- 去掉 `--no-bundle` 会按 `tauri.conf.json` 生成 NSIS 安装包 `target\release\bundle\nsis\uBot Manager_<版本>_x64-setup.exe`：按当前用户安装，可在安装向导里选择目录，界面随系统语言显示中文或英文。首次打包时 Tauri 会把 NSIS 下载到 `%LOCALAPPDATA%\tauri`（不能改位置；想放到别的盘，可以先把这个目录建成指向别处的目录联接）。安装包没有代码签名，SmartScreen 会提示未知发布者。
+- 去掉 `--no-bundle` 会按 `tauri.conf.json` 生成 NSIS 安装包 `target\release\bundle\nsis\uBot Manager_<版本>_x64-setup.exe`：按当前用户安装，可在安装向导里选择目录，界面随系统语言显示中文或英文。首次打包时 Tauri 会把 NSIS 下载到 `%LOCALAPPDATA%\tauri`（不能改位置；想放到别的盘，可以先把这个目录建成指向别处的目录联接）。本地打出的安装包没有代码签名，SmartScreen 会提示未知发布者；发布用的安装包由 GitHub Actions 构建，见 [发布 uBot Manager](#发布-ubot-manager)。
 - 开发：在 `app/` 里运行 `npm run tauri dev` 启动带热更新的桌面程序；`npm run dev` 只启动前端，页面使用内存里的 mock 后端，可以用参数直达某个界面，例如 `http://localhost:5173/?lang=zh-CN&theme=light&view=problems`，参数有 `lang`、`theme`、`view`、`dialog`、`section`、`select`、`noproject`，以及 `prebuilt=0`（“有预编译版本时优先使用”从关闭开始，安装就走克隆加编译；默认是开）。
 
 测试：
@@ -463,6 +463,35 @@ npm run build             # tsc 类型检查 + vite 构建
 - 更新内置的索引副本：`node scripts/sync-index.mjs`（`--check` 只比较不写入）。默认从工作区里的 `Plugins/uBot/uBotCore/Index/index.json` 复制，也可以用 `--from` 或环境变量 `UBOTCORE_INDEX` 指定。`--check` 在未指定源且工作区索引读不到时，会回退到 GitHub 上的 uBotCore 索引进行比较。
 - 手动运行时设置 `UBOT_MANAGER_HOME` 指向一个临时目录，避免动到自己的设置。
 
+## 发布 uBot Manager
+
+发布用的安装包只由 GitHub Actions 的 `Release` 工作流（[`.github/workflows/release.yml`](.github/workflows/release.yml)）在 GitHub 托管的 Windows 机器上构建，不用本地打的包。
+
+1. 把版本号改成新版本：根目录 `Cargo.toml` 的 `[workspace.package]`、`src-tauri/tauri.conf.json`、`app/package.json`（以及 `app/package-lock.json` 开头的两处），提交并推送。
+2. 打标签 `v<版本>` 并推送。工作流检查三处版本和标签一致，跑前端和 Rust 的测试，构建安装包。
+3. 签名接入后，工作流先后提交两个签名请求，先签 `ubot-manager.exe`、再签安装包，每个都要在 SignPath 里批准，一小时内没批准就失败。
+4. 工作流最后生成一个草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
+
+手动运行工作流（Actions 页的 *Run workflow*）只构建，安装包留在这次运行的 Artifacts 里，不生成 Release。
+
+## Code signing policy
+
+发布的安装包由上面的工作流从本仓库的源码构建后签名。签名正在向 SignPath Foundation 申请，生效之前发布的安装包没有签名。
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- Committers and reviewers: [AstreoX](https://github.com/AstreoX)
+- Approvers: [AstreoX](https://github.com/AstreoX)
+
+Privacy policy: uBot Manager does not collect or send personal data, usage data or telemetry. It connects to other systems only to:
+
+- download the package index, by default from `raw.githubusercontent.com`: at startup (can be turned off with *Settings > Package Index > Sync index on startup*) and when you click the refresh button;
+- download prebuilt packages or clone package repositories from the addresses listed in the index (by default `github.com`) when you install or update packages.
+
+Requests to GitHub are covered by the [GitHub General Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement).
+
+隐私说明：uBot Manager 不收集、不发送任何个人信息或使用数据。它只在两种情况下联网：同步包索引（默认启动时同步，可以在 `设置 > Package 索引 > 启动时同步索引` 关闭，也可以点刷新按钮手动同步）；安装或更新 Package 时，从索引里写的地址下载预编译包或克隆仓库（默认都在 GitHub）。
+
 ## 仓库结构
 
 | 路径 | 内容 |
@@ -472,6 +501,7 @@ npm run build             # tsc 类型检查 + vite 构建
 | `src-tauri` | Tauri 外壳：命令、事件、单实例、启动流程、注册表登记 |
 | `app` | 前端（Vite、React、TypeScript）：视图、对话框、中英文语言包、mock 后端 |
 | `scripts` | `sync-index.mjs` |
+| `.github/workflows` | `release.yml`：构建、签名并起草 Release |
 | `docs/SPEC.md` | 实现所依据的技术规格，英文 |
 
 ## 版本与许可
