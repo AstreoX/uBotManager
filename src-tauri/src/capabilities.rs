@@ -38,9 +38,7 @@ fn allowed(path: &str) -> bool {
 #[cfg(windows)]
 #[test]
 fn opener_may_open_projects_only() {
-    assert!(allowed(
-        r"E:\IDEProjects\UE-EAI-Simulator\DevHost\UBotDev.uproject"
-    ));
+    assert!(allowed(r"D:\Projects\RobotSim\RobotSim.uproject"));
     // The scope canonicalizes existing files to verbatim paths.
     assert!(allowed(r"\\?\E:\Sims\My Sim\MyRobotSim.uproject"));
     assert!(allowed(r"\\?\UNC\server\share\Sim\Sim.uproject"));
