@@ -317,10 +317,16 @@ fn packs_built_packages_and_updates_an_index() {
     for line in original.lines() {
         assert!(updated.contains(line), "the line {line:?} was kept");
     }
+    // Only the packed version changed: the real index already lists binaries of other releases.
     let mut without: Value = value.clone();
     for package in without["packages"].as_array_mut().unwrap() {
+        if package["name"] != "UBotSensor" {
+            continue;
+        }
         for version in package["versions"].as_array_mut().unwrap() {
-            version.as_object_mut().unwrap().remove("binaries");
+            if version["version"] == "0.1.0" {
+                version.as_object_mut().unwrap().remove("binaries");
+            }
         }
     }
     let original_value: Value =
