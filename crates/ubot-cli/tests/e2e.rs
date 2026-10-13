@@ -148,9 +148,26 @@ fn with_version_name(text: &str, version: &str) -> String {
     format!("{}{version}{}", &text[..open], &text[close..])
 }
 
+/// Sets every `^0.1.x` requirement of a descriptor to `^0.1.0`, the range the test index uses, so
+/// the copies stay consistent whatever minimum the real repositories require by now.
+fn with_requires_from_0_1_0(text: &str) -> String {
+    const KEY: &str = "\"Version\": \"^0.1.";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        let start = at + KEY.len();
+        let end = start + rest[start..].find('"').expect("the requirement ends");
+        out.push_str(&rest[..start]);
+        out.push('0');
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Makes `v{version}` a release in the bare copy `remotes/{folder}.git`: a commit on top of its
-/// branch whose `{name}.uplugin` says `version` (no commit when it already does), tagged
-/// `v{version}`. The commit is made in a temporary working clone.
+/// branch whose `{name}.uplugin` says `version` and requires `^0.1.0` (no commit when it already
+/// does), tagged `v{version}`. The commit is made in a temporary working clone.
 fn release(root: &Path, remotes: &Path, name: &str, folder: &str, version: &str) {
     let bare = remotes.join(format!("{folder}.git"));
     let work = root.join(format!("work-{folder}-{version}"));
@@ -168,7 +185,7 @@ fn release(root: &Path, remotes: &Path, name: &str, folder: &str, version: &str)
     );
     let descriptor = work.join(format!("{name}.uplugin"));
     let text = fs::read_to_string(&descriptor).unwrap();
-    let released = with_version_name(&text, version);
+    let released = with_requires_from_0_1_0(&with_version_name(&text, version));
     if released != text {
         fs::write(&descriptor, released).unwrap();
         git(
