@@ -172,10 +172,44 @@ fn set_readonly(path: &Path, readonly: bool) {
     }
 }
 
+/// ERROR_NOT_SAME_DEVICE. Windows reports it when an app sandbox redirects part of a path (MSIX) and the
+/// rename would cross the redirection. On other systems code 17 means something else.
+fn is_not_same_device(error: &io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(17)
+}
+
+/// Moves `temp` over `path`, copying instead when the rename fails with ERROR_NOT_SAME_DEVICE. A read-only
+/// target is made writable for the replacement and read-only again afterwards.
+fn replace_file(
+    temp: &Path,
+    path: &Path,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let was_readonly = fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly());
+    if was_readonly {
+        set_readonly(path, false);
+    }
+    let result = match rename(temp, path) {
+        Err(error) if is_not_same_device(&error) => {
+            fs::copy(temp, path).and_then(|_| fs::remove_file(temp))
+        }
+        result => result,
+    };
+    if was_readonly {
+        // Restore the flag even if the rename or fallback copy failed.
+        set_readonly(path, true);
+    }
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
 /// Writes through a temporary file in the same directory and renames it over the target.
+/// Falls back to copying if Windows sandbox redirection makes the rename cross devices.
 ///
 /// A read-only target (the default state of a file in a Perforce workspace) cannot be replaced by a
-/// rename on Windows. Its flag is cleared for the rename and set again afterwards, so the file
+/// rename on Windows. Its flag is cleared for the replacement and set again afterwards, so the file
 /// keeps the state its source control gave it.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = path
@@ -192,16 +226,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
-        let was_readonly = fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly());
-        if was_readonly {
-            set_readonly(path, false);
-        }
-        let renamed = fs::rename(&temp, path);
-        if was_readonly {
-            // On success `path` is the new file, on failure still the old one.
-            set_readonly(path, true);
-        }
-        renamed
+        replace_file(&temp, path, |temp, path| fs::rename(temp, path))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
@@ -384,6 +409,129 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
         // Clear the flag so the temporary directory can be removed.
         set_readonly(&file, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copies_when_rename_reports_not_same_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let temp = dir.path().join(".settings.json.tmp");
+        fs::write(&file, b"one").unwrap();
+        let entries = fs::read_dir(dir.path()).unwrap().count();
+        fs::write(&temp, b"two").unwrap();
+
+        replace_file(&temp, &file, |_, _| Err(io::Error::from_raw_os_error(17))).unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+        assert!(!temp.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), entries);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copies_over_a_read_only_file_and_keeps_it_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("P.uproject");
+        let temp = dir.path().join(".P.uproject.tmp");
+        fs::write(&file, b"one").unwrap();
+        set_readonly(&file, true);
+        let entries = fs::read_dir(dir.path()).unwrap().count();
+        fs::write(&temp, b"two").unwrap();
+
+        replace_file(&temp, &file, |_, _| Err(io::Error::from_raw_os_error(17))).unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+        assert!(fs::metadata(&file).unwrap().permissions().readonly());
+        assert!(!temp.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), entries);
+        set_readonly(&file, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copies_to_a_missing_file_when_rename_reports_not_same_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let temp = dir.path().join(".settings.json.tmp");
+        fs::write(&temp, b"two").unwrap();
+
+        replace_file(&temp, &file, |_, _| Err(io::Error::from_raw_os_error(17))).unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+        assert!(!temp.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn preserves_other_rename_errors_and_cleans_up_temp_file() {
+        for readonly in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("settings.json");
+            let temp = dir.path().join(".settings.json.tmp");
+            fs::write(&file, b"one").unwrap();
+            set_readonly(&file, readonly);
+            let entries = fs::read_dir(dir.path()).unwrap().count();
+            fs::write(&temp, b"two").unwrap();
+
+            let error = replace_file(&temp, &file, |_, _| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "rename denied",
+                ))
+            })
+            .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), "rename denied");
+            assert_eq!(error.raw_os_error(), None);
+            assert_eq!(fs::read_to_string(&file).unwrap(), "one");
+            assert_eq!(
+                fs::metadata(&file).unwrap().permissions().readonly(),
+                readonly
+            );
+            assert!(!temp.exists());
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), entries);
+            set_readonly(&file, false);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restores_read_only_state_when_copy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("P.uproject");
+        let temp = dir.path().join(".P.uproject.tmp");
+        fs::write(&file, b"one").unwrap();
+        set_readonly(&file, true);
+        let entries = fs::read_dir(dir.path()).unwrap().count();
+        fs::write(&temp, b"two").unwrap();
+
+        let error = replace_file(&temp, &file, |temp, _| {
+            fs::remove_file(temp)?;
+            Err(io::Error::from_raw_os_error(17))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one");
+        assert!(fs::metadata(&file).unwrap().permissions().readonly());
+        assert!(!temp.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), entries);
+        set_readonly(&file, false);
+    }
+
+    #[test]
+    fn recognizes_not_same_device_only_on_windows() {
+        assert_eq!(
+            is_not_same_device(&io::Error::from_raw_os_error(17)),
+            cfg!(windows)
+        );
+        assert!(!is_not_same_device(&io::Error::from_raw_os_error(5)));
+        assert!(!is_not_same_device(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "rename denied"
+        )));
     }
 
     #[test]

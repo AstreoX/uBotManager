@@ -244,7 +244,10 @@ whitespace-separated comparators with `= >= > <= < ^ ~`, X-range partials, and u
   remove = delete the entry. Keep a UTF-8 byte order mark if the file has one. Writes are atomic (temp
   file + rename; the settings, task history, caches and the project files the manager edits all go
   through one helper, which clears the read-only flag of a read-only target for the rename and sets it
-  again afterwards, so the file keeps the state source control gave it). A plan whose steps would
+  again afterwards, so the file keeps the state source control gave it). When an app sandbox (an MSIX
+  package such as the Claude desktop app) redirects the folder and the rename fails with Windows error
+  17 (ERROR_NOT_SAME_DEVICE), the helper copies the temporary file over the target instead and removes
+  it; any other error is returned as it is. A plan whose steps would
   rewrite a read-only `.uproject` is refused up front (`plan.projectReadOnly`: check it out or clear the
   flag first).
 - **Engine resolution** from `EngineAssociation`:
