@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "check-index": "node ../scripts/sync-index.mjs --check",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "node scripts/tauri.mjs"

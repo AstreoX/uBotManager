@@ -1228,7 +1228,10 @@ and waits up to 10 s for it to stop its processes and remove a partial clone or 
   `npm test` type-checks against `types.ts`; after changing the model run
   `UBOT_UPDATE_CONTRACT=1 cargo test -p ubot-manager contract`, then `npm test` in `app/`.
 - Index: `node scripts/sync-index.mjs --check` fails when the embedded copy differs from uBotCore's
-  `Index/index.json`; `node scripts/sync-index.mjs` refreshes it. `real_index.rs` validates both copies
+  `Index/index.json` (line endings are ignored; without the workspace layout it compares with the file on
+  uBotCore's `main` on GitHub; `UBOT_SKIP_INDEX_CHECK=1` skips it for offline builds). `npm run tauri
+  build` runs it first (`beforeBuildCommand`), so a stale copy cannot be packaged.
+  `node scripts/sync-index.mjs` refreshes it. `real_index.rs` validates both copies
   and checks them against `index.schema.json` (`UBOTCORE_DIR` or the workspace layout; skipped without
   uBotCore), including which `binaries` shapes the schema and `ubot index validate` accept and refuse.
 - CLI end-to-end (temp dirs only; `UBOT_PLUGINS_DIR` or the workspace layout, skipped without the

@@ -12,7 +12,7 @@
       "cwd": "../app"
     },
     "beforeBuildCommand": {
-      "script": "npm run build",
+      "script": "npm run check-index && npm run build",
       "cwd": "../app"
     }
   },
