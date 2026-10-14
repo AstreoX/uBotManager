@@ -562,6 +562,8 @@ it may have the old binaries loaded).
   Closing the app (and Ctrl+C in the CLI) cancels the running task; the app waits up to 10 s for it to
   clean up.
 - Task history (last 30 tasks, each step log capped at 5000 lines) persists in `<data>/tasks.json`.
+  Each task records the project's name and path at creation; old records without `projectPath` load with
+  an empty path.
   Tasks that were still running when the manager exited are marked `failed` on the next load. A history
   file that cannot be read is copied to `tasks.json.bad-<unix time>` before it is replaced.
 - When a task finishes the app refreshes the snapshot (without syncing) and emits it.
@@ -744,6 +746,8 @@ export interface TaskStep {
 }
 export interface Task {
   id: string; title: Msg; project: string; status: StepStatus; startedAt: string;
+  /** Empty string for old history records. */
+  projectPath: string;
   durationMs: number | null; steps: TaskStep[]; error: string | null; changes: Change[];
 }
 
@@ -1161,7 +1165,8 @@ Structure:
   "Use prebuilt binaries when available" / "有预编译版本时优先使用" (`install.usePrebuilt`, on by default, §6), saved
   with the rest. The Installation and ROS Bridge pages test git / the bridge when first opened.
 - Tasks: a project's finished task can be rerun (its changes are planned again) while no task runs; other
-  projects' tasks cannot. Projects cannot be switched while a task runs (`task.busy`).
+  projects' tasks cannot. Projects are matched by path (by name for old records without a path).
+  Projects cannot be switched while a task runs (`task.busy`).
 - Custom title bar: the header is the drag region (`data-tauri-drag-region`); minimize,
   maximize/restore and close buttons at the far right, JetBrains Windows style.
 - No project open: the Packages view shows "Open a project" with an Open… button (native file dialog,

@@ -1167,8 +1167,9 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     const task: Task = {
       id: `task-${++taskCounter}`,
       title: title ?? { code: "task.apply", params: { project: project?.name ?? "" } },
-      // The project name (the .uproject stem), like the core: it is what the Tasks view compares with the open project.
+      // The project name and path, like the core; the Tasks view compares the path with the open project.
       project: project?.name ?? "",
+      projectPath: project?.path ?? "",
       status: "pending",
       startedAt: nowIso(),
       durationMs: null,
@@ -1192,7 +1193,7 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     const task: Task = {
       id: "task-0",
       title: { code: "task.install", params: { package: "UBotROS", version: "0.1.0" } },
-      project: "MyRobotSim", status: "done", startedAt: new Date(started).toISOString(), durationMs: 112_000,
+      project: "MyRobotSim", projectPath: SCENARIO_PROJECT, status: "done", startedAt: new Date(started).toISOString(), durationMs: 112_000,
       steps: [
         done("s1", "step.clone", { package: "UBotROS", version: "0.1.0" }, 0, 5_200),
         done("s2", "step.enablePackage", { package: "UBotROS" }, 5_300, 200),

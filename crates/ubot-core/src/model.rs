@@ -506,6 +506,9 @@ pub struct Task {
     pub id: String,
     pub title: Msg,
     pub project: String,
+    /// Empty for task history written before project paths were recorded.
+    #[serde(default)]
+    pub project_path: String,
     pub status: StepStatus,
     pub started_at: String,
     pub duration_ms: Option<u64>,
@@ -671,6 +674,27 @@ mod tests {
             code: code.into(),
             params: BTreeMap::from([("package".to_string(), "UBotCore".to_string())]),
         }
+    }
+
+    #[test]
+    fn task_without_project_path_loads_with_empty_path() {
+        let task: Task = serde_json::from_str(
+            r#"{
+                "id": "legacy",
+                "title": { "code": "task.apply", "params": { "project": "P" } },
+                "project": "P",
+                "status": "done",
+                "startedAt": "2026-10-09T15:20:04Z",
+                "durationMs": 112000,
+                "steps": [],
+                "error": null,
+                "changes": []
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(task.id, "legacy");
+        assert_eq!(task.project, "P");
+        assert!(task.project_path.is_empty());
     }
 
     #[test]
@@ -1032,6 +1056,7 @@ mod tests {
             id: "t1".into(),
             title: msg("task.apply"),
             project: "P".into(),
+            project_path: r"E:\Projects\P\P.uproject".into(),
             status: StepStatus::Canceled,
             started_at: "now".into(),
             duration_ms: None,
@@ -1054,6 +1079,7 @@ mod tests {
                 "id",
                 "title",
                 "project",
+                "projectPath",
                 "status",
                 "startedAt",
                 "durationMs",
@@ -1062,6 +1088,7 @@ mod tests {
                 "changes"
             ]
         );
+        assert_eq!(value["projectPath"], r"E:\Projects\P\P.uproject");
         assert_eq!(value["status"], "canceled");
         assert_eq!(
             keys(&value["steps"][0]),

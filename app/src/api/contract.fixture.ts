@@ -878,6 +878,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "pending",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": null,
@@ -1040,6 +1041,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "waiting",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": null,
@@ -1097,6 +1099,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "running",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": null,
@@ -1157,6 +1160,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "done",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": 64000,
@@ -1214,6 +1218,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "failed",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": 64000,
@@ -1271,6 +1276,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "skipped",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": 64000,
@@ -1328,6 +1334,7 @@ export const tasks: Task[] = [
       }
     },
     "project": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
+    "projectPath": "E:/Sims/MyRobotSim/MyRobotSim.uproject",
     "status": "canceled",
     "startedAt": "2026-10-10T08:00:00Z",
     "durationMs": 64000,

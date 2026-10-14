@@ -96,6 +96,8 @@ export interface TaskStep {
 }
 export interface Task {
   id: string; title: Msg; project: string; status: StepStatus; startedAt: string;
+  /** Empty string for old history records. */
+  projectPath: string;
   durationMs: number | null; steps: TaskStep[]; error: string | null; changes: Change[];
 }
 
