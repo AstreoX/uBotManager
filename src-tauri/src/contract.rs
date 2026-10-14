@@ -476,6 +476,7 @@ fn tasks() -> Vec<Task> {
             id: format!("task-{status:?}").to_lowercase(),
             title: msg("task.apply", &[("project", "MyRobotSim")]),
             project: "E:/Sims/MyRobotSim/MyRobotSim.uproject".into(),
+            project_path: "E:/Sims/MyRobotSim/MyRobotSim.uproject".into(),
             status,
             started_at: "2026-10-10T08:00:00Z".into(),
             duration_ms: status.is_finished().then_some(64_000),

@@ -289,6 +289,7 @@ pub fn new_task(id: String, title: Msg, prepared: &PreparedPlan) -> TaskRecord {
             id,
             title,
             project: prepared.project_name.clone(),
+            project_path: paths::display(&prepared.project_path),
             status: StepStatus::Pending,
             started_at: now_rfc3339(),
             duration_ms: None,
@@ -1384,6 +1385,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn new_task_preserves_project_path() {
+        let project = Path::new(r"E:\Projects\My Robot Sim\MyRobotSim.uproject");
+        let plan = prepared(project, vec![]);
+        let record = new_task("t1".into(), msg("task.apply", &[("project", "P")]), &plan);
+        assert_eq!(record.task.project, plan.project_name);
+        assert_eq!(
+            record.task.project_path,
+            r"E:\Projects\My Robot Sim\MyRobotSim.uproject"
+        );
+    }
+
     fn context(editor: Arc<dyn Fn(&Path) -> bool + Send + Sync>, wait: bool) -> ExecContext {
         ExecContext {
             git: "git".into(),
@@ -1760,6 +1773,43 @@ mod tests {
         assert_eq!(tasks[0].steps[0].status, StepStatus::Skipped);
         assert_eq!(loaded.log(&newest, Some("s1")).unwrap(), ["line"]);
         assert!(loaded.log("nope", None).is_none());
+    }
+
+    #[test]
+    fn history_preserves_project_paths_and_legacy_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let project = r"E:\Projects\My Robot Sim\MyRobotSim.uproject";
+        let plan = prepared(Path::new(project), vec![]);
+        let mut record = new_task(
+            "current".into(),
+            msg("task.apply", &[("project", "P")]),
+            &plan,
+        );
+        record.task.status = StepStatus::Done;
+        let mut legacy = record.clone();
+        legacy.task.id = "legacy".into();
+        let mut file = serde_json::to_value(TaskFile {
+            tasks: vec![legacy, record],
+        })
+        .unwrap();
+        file["tasks"][0]["task"]
+            .as_object_mut()
+            .unwrap()
+            .remove("projectPath");
+        fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        let mut store = TaskStore::load(path.clone());
+        let tasks = store.list();
+        assert_eq!(tasks.len(), 2, "old history records must not be dropped");
+        assert_eq!(store.get("current").unwrap().task.project_path, project);
+        assert!(store.get("legacy").unwrap().task.project_path.is_empty());
+        store.save().unwrap();
+
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tasks"][0]["task"]["projectPath"], "");
+        assert_eq!(saved["tasks"][1]["task"]["projectPath"], project);
+        assert_eq!(TaskStore::load(path).list(), tasks);
     }
 
     /// `git` in `dir` with an identity, returning its output.

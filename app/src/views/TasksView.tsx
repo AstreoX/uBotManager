@@ -6,7 +6,7 @@ import { CheckIcon, ClockIcon, CloseIcon, PendingIcon, RerunIcon, SkipIcon, Spin
 import { OptionsMenu } from "../components/Menu";
 import { t, tm, tn } from "../i18n";
 import { errorText } from "../lib/errors";
-import { formatByteProgress, formatClock, formatDuration } from "../lib/format";
+import { formatByteProgress, formatClock, formatDuration, sameName } from "../lib/format";
 import {
   activeTask, appendLog, canRerun, defaultSelection, isDownloadStep, isFinished, isTaskOfProject, mergeLog, runningStep,
   stoppedStep, type Selection
@@ -92,7 +92,9 @@ export function TasksView() {
   const project = state.snapshot.project;
   const rerunnable = canRerun(selectedTask, running, project);
   const otherProject = !!selectedTask && !isTaskOfProject(selectedTask, project);
-  const rerunTitle = otherProject && selectedTask ? t("tasks.rerunOtherProject", { project: selectedTask.project }) : t("tasks.rerun");
+  const taskProject = selectedTask && project && otherProject && sameName(selectedTask.project, project.name)
+    ? selectedTask.projectPath : selectedTask?.project;
+  const rerunTitle = otherProject && selectedTask ? t("tasks.rerunOtherProject", { project: taskProject ?? selectedTask.project }) : t("tasks.rerun");
 
   return (
     <main className="tool-window">

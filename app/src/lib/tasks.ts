@@ -19,18 +19,23 @@ export function canSwitchProject(tasks: Task[]): boolean {
 }
 
 /**
- * Whether a task ran in the open project. `Task.project` is the project's name (the .uproject file name without
- * its extension), and the task history holds the tasks of every project.
+ * Whether a task ran in the open project. Compare paths when both are available; old history records or callers
+ * without a path fall back to the project name (the .uproject file name without its extension).
  */
-export function isTaskOfProject(task: Task, project: { name: string } | null): boolean {
-  return project !== null && sameName(task.project, project.name);
+export function isTaskOfProject(task: Task, project: { name: string; path?: string } | null): boolean {
+  if (project === null) return false;
+  if (task.projectPath && project.path) {
+    const normalize = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    return normalize(task.projectPath) === normalize(project.path);
+  }
+  return sameName(task.project, project.name);
 }
 
 /**
  * Whether a task can be rerun. Rerun plans the changes of a finished task against the open project, so it is offered
  * for the tasks of that project only: for another one it would install, update or remove Packages in the wrong project.
  */
-export function canRerun(task: Task | undefined, running: Task | undefined, project: { name: string } | null): boolean {
+export function canRerun(task: Task | undefined, running: Task | undefined, project: { name: string; path?: string } | null): boolean {
   return !!task && isFinished(task.status) && !running && task.changes.length > 0 && isTaskOfProject(task, project);
 }
 

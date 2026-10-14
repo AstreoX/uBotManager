@@ -8,10 +8,11 @@ import {
 
 afterEach(() => setLanguage("en"));
 
-/** `Task.project` is the project's name, like the core stores it. */
+/** The core stores both the project's name and its .uproject path. */
 function task(id: string, status: StepStatus, steps: StepStatus[], startedAt = "2026-10-10T08:00:00Z", error: string | null = null): Task {
   return {
-    id, title: { code: "task.apply", params: { project: "P" } }, project: "P", status, startedAt, durationMs: null,
+    id, title: { code: "task.apply", params: { project: "P" } }, project: "P", projectPath: "E:\\Projects\\P\\P.uproject",
+    status, startedAt, durationMs: null,
     steps: steps.map((s, i) => ({
       id: `s${i + 1}`, title: { code: "step.build", params: { target: "T" } }, status: s, startedAt: null, durationMs: null,
       progress: null, logLines: 0
@@ -87,6 +88,45 @@ describe("canRerun", () => {
   it("compares project names like package names, case-insensitively", () => {
     expect(isTaskOfProject({ ...finished, project: "myrobotsim" }, { name: "MyRobotSim" })).toBe(true);
     expect(canRerun({ ...finished, project: "myrobotsim" }, undefined, { name: "MyRobotSim" })).toBe(true);
+  });
+
+  it("rejects same-named projects in different directories", () => {
+    const other = { name: "P", path: "E:\\Other\\P\\P.uproject" };
+    expect(isTaskOfProject(finished, other)).toBe(false);
+    expect(canRerun(finished, undefined, other)).toBe(false);
+  });
+
+  it.each([
+    "e:\\projects\\p\\p.uproject",
+    "E:/Projects/P/P.uproject",
+    "e:/PROJECTS/P/P.UPROJECT///",
+    "E:\\Projects\\P\\P.uproject\\\\"
+  ])("matches project paths regardless of case, separators or trailing slashes: %s", (path) => {
+    const openProject = { name: "P", path };
+    expect(isTaskOfProject(finished, openProject)).toBe(true);
+    expect(canRerun(finished, undefined, openProject)).toBe(true);
+  });
+
+  it("uses path identity even when project names differ", () => {
+    const openProject = { name: "Other", path: finished.projectPath };
+    expect(isTaskOfProject(finished, openProject)).toBe(true);
+    expect(canRerun(finished, undefined, openProject)).toBe(true);
+  });
+
+  it("falls back to case-insensitive names for old history without a path", () => {
+    const legacy = { ...finished, project: "p", projectPath: "" };
+    const sameName = { name: "P", path: "E:/Other/P/P.uproject" };
+    const otherName = { name: "Other", path: finished.projectPath };
+    expect(isTaskOfProject(legacy, sameName)).toBe(true);
+    expect(canRerun(legacy, undefined, sameName)).toBe(true);
+    expect(isTaskOfProject(legacy, otherName)).toBe(false);
+    expect(canRerun(legacy, undefined, otherName)).toBe(false);
+    expect(canRerun(legacy, undefined, null)).toBe(false);
+  });
+
+  it.each([undefined, ""])("falls back to names when the caller has no project path: %s", (path) => {
+    expect(canRerun(finished, undefined, { name: "p", path })).toBe(true);
+    expect(canRerun(finished, undefined, { name: "Other", path })).toBe(false);
   });
 
   it("is not offered without an open project, without a task or without changes", () => {

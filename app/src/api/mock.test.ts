@@ -115,16 +115,17 @@ describe("mock backend tasks", () => {
     expect((await backend.openProject(WAREHOUSE)).project?.path).toBe(WAREHOUSE);
   });
 
-  it("records the project's name in a task, which is what Rerun compares with the open project", async () => {
+  it("records the project's name and path in history and new tasks", async () => {
     const { backend } = createMockBackend(params);
     const history = (await backend.listTasks()).find((x) => x.id === "task-0");
     expect(history?.project).toBe("MyRobotSim");
+    expect(history?.projectPath).toBe(SCENARIO);
     const scenario = await backend.getSnapshot();
     expect(canRerun(history, undefined, scenario.project)).toBe(true);
 
     const options = { build: false, reopenEditor: false, runTests: false };
     const id = await backend.apply([{ kind: "install", package: "UBotMCP", version: null }], options, null, null);
-    expect((await backend.listTasks()).find((x) => x.id === id)?.project).toBe("MyRobotSim");
+    expect((await backend.listTasks()).find((x) => x.id === id)).toMatchObject({ project: "MyRobotSim", projectPath: SCENARIO });
     await backend.cancelTask(id);
     await untilIdle(backend);
 
@@ -132,6 +133,29 @@ describe("mock backend tasks", () => {
     const other = await backend.openProject(WAREHOUSE);
     expect(other.project?.name).toBe("WarehouseBot");
     expect(canRerun(history, undefined, other.project)).toBe(false);
+  });
+
+  it("keeps task paths when a same-named project in another directory is opened", async () => {
+    const { backend } = createMockBackend(params);
+    const history = (await backend.listTasks()).find((x) => x.id === "task-0");
+    const path = "E:\\Other\\MyRobotSim\\MyRobotSim.uproject";
+    const other = await backend.openProject(path);
+    expect(other.project?.name).toBe(history?.project);
+    expect(canRerun(history, undefined, other.project)).toBe(false);
+
+    const options = { build: false, reopenEditor: false, runTests: false };
+    const id = await backend.apply([{ kind: "install", package: "UBotMCP", version: null }], options, null, null);
+    expect((await backend.listTasks()).find((x) => x.id === id)).toMatchObject({ project: "MyRobotSim", projectPath: path });
+    expect((await backend.listTasks()).find((x) => x.id === "task-0")?.projectPath).toBe(SCENARIO);
+    await backend.cancelTask(id);
+    await untilIdle(backend);
+  });
+
+  it("reruns history in the same project with different path case and separators", async () => {
+    const { backend } = createMockBackend(params);
+    const history = (await backend.listTasks()).find((x) => x.id === "task-0");
+    const same = await backend.openProject("d:/projects/myrobotsim/myrobotsim.uproject");
+    expect(canRerun(history, undefined, same.project)).toBe(true);
   });
 });
 
