@@ -421,9 +421,14 @@ ubot package <Name[@版本]>... --out <目录> [--engine <5.5 | 引擎根目录>
    ```
 
    这一步要完整地编译一遍，耗时取决于机器；需要 git、启动器版本的引擎和 Visual Studio 2022。
-3. 把 `E:\release` 里的 zip 上传到各自仓库、对应标签的 GitHub Release（默认模板的地址是 `https://github.com/AstreoX/<仓库>/releases/download/<标签>/<文件名>`），文件名必须和索引里 `url` 的最后一段一致。可以用网页，也可以用 `gh release upload`。
-4. 校验：`ubot index validate $index`。可以在一个使用启动器引擎的测试工程里再跑 `ubot plan install:UBotROS`，计划里应该出现 `Download` 步骤、没有 `Build`。
-5. 提交并推送 uBotCore 的 `Index/index.json`（远程源读取的就是 `main`），再在这个仓库运行 `node scripts/sync-index.mjs` 更新内置副本。
+3. 把 `E:\release` 里的 zip 和同名的 `.sha256` 上传到各自仓库、对应标签的 GitHub Release（默认模板的地址是 `https://github.com/AstreoX/<仓库>/releases/download/<标签>/<文件名>`），文件名必须和索引里 `url` 的最后一段一致。标签还没有 Release 时用 `gh release create` 创建，已经有或者重新上传时用 `gh release upload --clobber`：
+
+   ```powershell
+   gh release create v0.1.2 E:\release\UBotCore-0.1.2-UE5.5-Win64.zip E:\release\UBotCore-0.1.2-UE5.5-Win64.zip.sha256 --repo AstreoX/uBotCore --title "uBotCore 0.1.2" --notes-file notes.md
+   gh release upload v0.1.2 E:\release\UBotCore-0.1.2-UE5.5-Win64.zip E:\release\UBotCore-0.1.2-UE5.5-Win64.zip.sha256 --repo AstreoX/uBotCore --clobber
+   ```
+4. 校验：先确认索引里每个新的 `binaries` 地址都能下载（`curl.exe -sIL <url>` 的最后一个状态应是 200），再运行 `ubot index validate $index`。可以在一个使用启动器引擎的测试工程里再跑 `ubot plan install:UBotROS`，计划里应该出现 `Download` 步骤、没有 `Build`。
+5. 提交并推送 uBotCore 的 `Index/index.json`（远程源读取的就是 `main`），再在这个仓库运行 `node scripts/sync-index.mjs` 更新内置副本，提交并推送。
 
 先上传、后推送索引：索引一推送，用户就会开始下载。压缩包重新上传过（字节变了）就必须重新 `--update-index`，否则 SHA-256 和 `size` 对不上，安装会失败。
 
@@ -467,10 +472,11 @@ npm run build             # tsc 类型检查 + vite 构建
 
 发布用的安装包只由 GitHub Actions 的 `Release` 工作流（[`.github/workflows/release.yml`](.github/workflows/release.yml)）在 GitHub 托管的 Windows 机器上构建，不用本地打的包。
 
-1. 把版本号改成新版本：根目录 `Cargo.toml` 的 `[workspace.package]`、`src-tauri/tauri.conf.json`、`app/package.json`（以及 `app/package-lock.json` 开头的两处），提交并推送。
-2. 打标签 `v<版本>` 并推送。工作流检查三处版本和标签一致，跑前端和 Rust 的测试，构建安装包。
-3. 签名接入后，工作流先后提交两个签名请求，先签 `ubot-manager.exe`、再签安装包，每个都要在 SignPath 里批准，一小时内没批准就失败。
-4. 工作流最后生成一个草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
+1. 先发布还没发布的 Package（见 [发布流程](#发布流程)），然后运行 `node scripts/sync-index.mjs` 更新内置索引副本，提交并推送。构建前会检查这份副本是否最新，过旧就失败。
+2. 把版本号改成新版本：根目录 `Cargo.toml` 的 `[workspace.package]`、`src-tauri/tauri.conf.json`、`app/package.json`（以及 `app/package-lock.json` 开头的两处），提交并推送。
+3. 打标签 `v<版本>` 并推送。工作流检查三处版本和标签一致，跑前端和 Rust 的测试，检查内置索引副本，构建安装包。
+4. 签名接入后，工作流先后提交两个签名请求，先签 `ubot-manager.exe`、再签安装包，每个都要在 SignPath 里批准，一小时内没批准就失败。
+5. 工作流最后生成一个草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
 
 手动运行工作流（Actions 页的 *Run workflow*）只构建，安装包留在这次运行的 Artifacts 里，不生成 Release。
 
