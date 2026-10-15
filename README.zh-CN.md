@@ -23,35 +23,35 @@
 
 ## 简介
 
-uBot Manager 是一个 Windows 桌面程序，在 Unreal Engine 5.5 工程里安装、更新、启用、禁用和卸载 uBot Package。它先处理依赖并给出计划，由你确认后，再下载预编译包，或克隆源码并编译。命令行 `ubot` 使用同一个核心，适合脚本和 CI。
+uBot Manager 是 Windows 桌面程序，用于在 Unreal Engine 5.5 工程中安装、更新、启用、禁用和卸载 uBot Package。它自动处理依赖并生成计划，确认后下载预编译包，或克隆源码并编译。命令行 `ubot` 与桌面程序共用同一个核心，面向脚本和 CI。
 
-- **先看计划，再执行。** 更改先进入待应用列表，以步骤列出；确认之前不会执行任何步骤。
-- **优先预编译。** 有适合当前引擎的预编译包时，下载并校验后直接使用；否则克隆对应标签并编译。
-- **依赖一并处理。** 需要的 Package 和引擎插件会一起安装或启用。
-- **Recipe。** 一次应用一组现成的组合，例如 ROS 2 传感器。
-- **问题和快速修复。** 依赖缺失或版本不符时列出问题，并给出可加入待应用列表的修复。
-- **依赖图、任务日志、主题。** 依赖图，每个任务的日志，简体中文和英文界面，深色和浅色主题。
+- **先计划，后执行。** 所有更改先以步骤列出，确认后才执行。
+- **预编译或源码。** 引擎为启动器版本且索引中有对应的预编译包时，下载并校验后安装；否则克隆对应标签并编译。
+- **依赖一并处理。** 所需的 Package 和引擎插件一起安装或启用。
+- **Recipe。** 按预设组合批量安装 Package，例如 ROS 2 传感器。
+- **问题与快速修复。** 列出依赖缺失、版本不符等问题，并提供快速修复。
+- **依赖图、任务日志、主题。** 提供依赖图和任务日志，界面支持简体中文与英文、深色与浅色主题。
 
 ## 安装
 
-1. 到 [Releases](https://github.com/AstreoX/uBotManager/releases) 下载 `uBot-Manager_<版本>_x64-setup.exe` 并运行。安装包按当前用户安装，不需要管理员权限，可以在向导里选择目录。
-2. 安装包没有代码签名，Windows SmartScreen 可能提示「未知发布者」：点「更多信息 > 仍要运行」。
+1. 从 [Releases](https://github.com/AstreoX/uBotManager/releases) 下载 `uBot-Manager_<版本>_x64-setup.exe` 并运行。安装包按当前用户安装，无需管理员权限，安装目录可选。
+2. 安装包没有代码签名，SmartScreen 会提示「未知发布者」，选择「更多信息 > 仍要运行」。
 
 其他方式：
 
-- **命令行 `ubot`。** 安装包里没有它，用 `cargo build --release -p ubot-cli` 构建（Rust stable，MSVC），生成 `target\release\ubot.exe`。
-- **从源码构建。** 自己构建桌面程序，见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
-- **不用 Manager。** 手动克隆插件，见[安装指南](https://astreox.github.io/uBotDocs/start/install/)。
+- **命令行 `ubot`。** 不含在安装包中，用 `cargo build --release -p ubot-cli` 构建（Rust stable，MSVC），产物为 `target\release\ubot.exe`。
+- **从源码构建。** 构建桌面程序，参见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+- **不使用 Manager。** 手动安装插件，参见[安装指南](https://astreox.github.io/uBotDocs/start/install/)。
 
-运行要求：Windows 10 或 11（WebView2 运行库，Windows 11 已自带）和 Unreal Engine 5.5。从源码安装需要 git，编译需要 Visual Studio 2022（含 C++ 工具链）；只安装预编译包时两者都不需要。
+运行要求：Windows 10 或 11（WebView2 运行库，Windows 11 已内置）和 Unreal Engine 5.5。从源码安装另需 git 和 Visual Studio 2022（含 C++ 工具链）。
 
 ## 快速开始
 
-1. 启动 uBot Manager，点 `打开…`，选择你的 `.uproject`。
-2. 点 `Recipe`，选 `ROS 2 传感器`，点 `查看更改…`，再点 `应用`。
-3. 用 UE 5.5 打开工程：`Window > uBot` 里列出已加载的 Package。
+1. 启动 uBot Manager，单击 `打开…`，选择工程的 `.uproject` 文件。
+2. 单击 `Recipe`，选择 `ROS 2 传感器`，再依次单击 `查看更改…` 和 `应用`。
+3. 用 UE 5.5 打开工程，在 `Window > uBot` 中查看已加载的 Package。
 
-在命令行里做同样的事，其中 `plan` 不会改动任何东西：
+命令行的等价操作（`plan` 只显示计划）：
 
 ```powershell
 ubot --project .\MyRobotSim.uproject status
@@ -59,7 +59,7 @@ ubot --project .\MyRobotSim.uproject plan install:UBotROS
 ubot --project .\MyRobotSim.uproject apply install:UBotROS --yes
 ```
 
-桌面程序和命令行共用一个核心：
+桌面程序和命令行共用同一个核心：
 
 ```mermaid
 flowchart LR
@@ -74,13 +74,13 @@ flowchart LR
 
 | 我想 ... | 去这里 |
 | --- | --- |
-| 把 uBot Package 装进工程 | [安装 uBot](https://astreox.github.io/uBotDocs/start/install/) |
-| 了解视图、任务和问题 | [界面导览](https://astreox.github.io/uBotDocs/manager/) |
+| 将 uBot Package 安装到工程 | [安装 uBot](https://astreox.github.io/uBotDocs/start/install/) |
+| 了解界面、任务和问题 | [界面导览](https://astreox.github.io/uBotDocs/manager/) |
 | 安装、更新或移除 Package | [安装、更新、移除插件](https://astreox.github.io/uBotDocs/manager/packages/) |
-| 一次装好一组 Package | [组合方案](https://astreox.github.io/uBotDocs/manager/recipes/) |
+| 批量安装一组 Package | [组合方案](https://astreox.github.io/uBotDocs/manager/recipes/) |
 | 修改设置和索引源 | [uBot Manager 设置](https://astreox.github.io/uBotDocs/manager/settings/) |
-| 在脚本或 CI 里使用 | [命令行 `ubot`](https://astreox.github.io/uBotDocs/manager/cli/) |
-| 编写自己的 uBot Package | [编写自己的 uBot Package](https://astreox.github.io/uBotDocs/develop/package-authoring/) |
+| 在脚本或 CI 中使用 | [命令行 `ubot`](https://astreox.github.io/uBotDocs/manager/cli/) |
+| 开发新的 uBot Package | [编写自己的 uBot Package](https://astreox.github.io/uBotDocs/develop/package-authoring/) |
 | 构建或发布 Manager | [DEVELOPMENT](docs/DEVELOPMENT.md) · [RELEASING](docs/RELEASING.md) · [INTERNALS](docs/INTERNALS.md) |
 
 ## uBot 系列
@@ -96,14 +96,14 @@ flowchart LR
 
 ## 开发
 
-- 需要 Rust（stable，MSVC）和 Node.js 22.12 或更新版本。在 `app/` 里运行 `npm ci` 和 `npm run tauri build -- --no-bundle`；在仓库根目录运行 `cargo build --release -p ubot-cli`。
-- 测试：`cargo test --workspace`，以及在 `app/` 里运行 `npm test`。
-- 细节见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，发布流程见 [docs/RELEASING.md](docs/RELEASING.md)。
-- 问题和建议请提到 [Issues](https://github.com/AstreoX/uBotManager/issues)。
+- 需要 Rust（stable，MSVC）和 Node.js 22.12 或更高版本。在 `app/` 中运行 `npm ci` 和 `npm run tauri build -- --no-bundle`，在仓库根目录运行 `cargo build --release -p ubot-cli`。
+- 测试：`cargo test --workspace`；在 `app/` 中运行 `npm test`。
+- 详见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，发布流程见 [docs/RELEASING.md](docs/RELEASING.md)。
+- 问题和建议请在 [Issues](https://github.com/AstreoX/uBotManager/issues) 中提出。
 
 ## 许可
 
-Copyright 2026 AstreoX。本项目以 [Apache License 2.0](LICENSE) 发布，可以自由使用、修改和再分发（包括商业用途），再分发时需保留 [LICENSE](LICENSE) 与 [NOTICE](NOTICE) 文件，并注明你修改过的文件。
+Copyright 2026 AstreoX。本项目以 [Apache License 2.0](LICENSE) 发布，参见 [NOTICE](NOTICE)。
 
 ### Code signing policy
 

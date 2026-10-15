@@ -23,35 +23,35 @@
 
 ## What it is
 
-uBot Manager is a Windows desktop app that installs, updates, enables, disables and removes uBot packages in an Unreal Engine 5.5 project. It resolves dependencies, shows you the plan, and only then downloads a prebuilt package or clones and builds one from source. The `ubot` command line runs the same core for scripts and CI.
+uBot Manager is a Windows desktop app that installs, updates, enables, disables and removes uBot packages in an Unreal Engine 5.5 project. It resolves dependencies, shows the plan, then downloads a prebuilt package or clones and builds one from source. The `ubot` command line runs the same core for scripts and CI.
 
-- **Review before anything runs.** Changes are queued and shown as steps; nothing is applied until you confirm.
-- **Prebuilt first.** Downloads a checked prebuilt package when one fits your engine; otherwise clones the tag and builds.
+- **Review before applying.** Every change is listed as steps and runs only after you confirm.
+- **Prebuilt or source.** Installs a prebuilt package when the index has one for your launcher-installed engine, and builds from source otherwise.
 - **Dependencies included.** Required packages and engine plugins are installed or enabled together.
-- **Recipes.** Apply a ready-made set, such as ROS 2 Sensors, in one pass.
-- **Problems with quick fixes.** Missing or mismatched dependencies are listed with fixes you can queue.
+- **Recipes.** Install a preset set of packages, such as ROS 2 Sensors, in one step.
+- **Problems and quick fixes.** Dependency problems are listed with quick fixes.
 - **Graph, task log, themes.** A dependency graph, a log per task, English and Simplified Chinese, dark and light.
 
 ## Install
 
-1. Download `uBot-Manager_<version>_x64-setup.exe` from [Releases](https://github.com/AstreoX/uBotManager/releases) and run it. It installs for the current user without administrator rights, and you can choose the folder.
-2. The installer is not code-signed, so Windows SmartScreen may show an "unknown publisher" prompt: choose *More info > Run anyway*.
+1. Download `uBot-Manager_<version>_x64-setup.exe` from [Releases](https://github.com/AstreoX/uBotManager/releases) and run it. It installs for the current user without administrator rights; the install folder is selectable.
+2. The installer is not code-signed. SmartScreen reports an unknown publisher; choose *More info > Run anyway*.
 
 Alternatives:
 
-- **`ubot` command line.** It is not in the installer. Build it with `cargo build --release -p ubot-cli` (Rust stable, MSVC); the result is `target\release\ubot.exe`.
-- **From source.** Build the desktop app yourself, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-- **Without the Manager.** Clone the plugins by hand, see the [install guide](https://astreox.github.io/uBotDocs/start/install/).
+- **`ubot` command line.** Not included in the installer. Build it with `cargo build --release -p ubot-cli` (Rust stable, MSVC); the output is `target\release\ubot.exe`.
+- **From source.** Build the desktop app, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+- **Without the Manager.** Install the plugins manually, see the [install guide](https://astreox.github.io/uBotDocs/start/install/).
 
-Requires Windows 10 or 11 (WebView2, built into Windows 11) and Unreal Engine 5.5. Git is needed to install from source and Visual Studio 2022 (C++ tools) to compile; installing prebuilt packages needs neither.
+Requires Windows 10 or 11 (WebView2 runtime, included in Windows 11) and Unreal Engine 5.5. Installing from source also requires Git and Visual Studio 2022 with the C++ toolchain.
 
 ## Quick start
 
-1. Start uBot Manager, click `Open…` and choose your `.uproject`.
-2. Click `Recipes`, select `ROS 2 Sensors`, click `Review Changes…`, then `Apply`.
-3. Open the project in UE 5.5: `Window > uBot` lists the loaded packages.
+1. Start uBot Manager, click `Open…` and select your `.uproject`.
+2. Click `Recipes`, select `ROS 2 Sensors`, then click `Review Changes…` and `Apply`.
+3. Open the project in UE 5.5. `Window > uBot` lists the loaded packages.
 
-The same from a shell, where `plan` changes nothing:
+On the command line (`plan` only prints the plan):
 
 ```powershell
 ubot --project .\MyRobotSim.uproject status
@@ -59,7 +59,7 @@ ubot --project .\MyRobotSim.uproject plan install:UBotROS
 ubot --project .\MyRobotSim.uproject apply install:UBotROS --yes
 ```
 
-Desktop app and command line share one core:
+The desktop app and the command line share one core:
 
 ```mermaid
 flowchart LR
@@ -72,18 +72,18 @@ flowchart LR
 
 ## Documentation
 
-The documentation site is written in Simplified Chinese.
+The documentation site and the files in `docs/` are in Simplified Chinese.
 
 | I want to ... | Go to |
 | --- | --- |
 | Install uBot packages in a project | [Install uBot](https://astreox.github.io/uBotDocs/start/install/) |
 | Learn the views, tasks and problems | [Interface tour](https://astreox.github.io/uBotDocs/manager/) |
 | Install, update or remove packages | [Install, update, remove](https://astreox.github.io/uBotDocs/manager/packages/) |
-| Apply a set of packages at once | [Recipes](https://astreox.github.io/uBotDocs/manager/recipes/) |
+| Install a set of packages at once | [Recipes](https://astreox.github.io/uBotDocs/manager/recipes/) |
 | Change settings and index sources | [Settings](https://astreox.github.io/uBotDocs/manager/settings/) |
-| Script it from a shell or CI | [`ubot` command line](https://astreox.github.io/uBotDocs/manager/cli/) |
-| Write my own uBot package | [Package authoring](https://astreox.github.io/uBotDocs/develop/package-authoring/) |
-| Build or release the Manager | [DEVELOPMENT](docs/DEVELOPMENT.md) · [RELEASING](docs/RELEASING.md) · [INTERNALS](docs/INTERNALS.md) (Chinese) |
+| Use it in scripts or CI | [`ubot` command line](https://astreox.github.io/uBotDocs/manager/cli/) |
+| Write a uBot package | [Package authoring](https://astreox.github.io/uBotDocs/develop/package-authoring/) |
+| Build or release the Manager | [DEVELOPMENT](docs/DEVELOPMENT.md) · [RELEASING](docs/RELEASING.md) · [INTERNALS](docs/INTERNALS.md) |
 
 ## uBot series
 
@@ -105,7 +105,7 @@ The documentation site is written in Simplified Chinese.
 
 ## License
 
-Copyright 2026 AstreoX. Released under the [Apache License 2.0](LICENSE): use, modify and redistribute freely, including commercially. Keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files when redistributing, and mark the files you changed.
+Copyright 2026 AstreoX. Licensed under the [Apache License 2.0](LICENSE); see also [NOTICE](NOTICE).
 
 ### Code signing policy
 
