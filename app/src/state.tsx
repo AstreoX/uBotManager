@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, initialChanges, mockParams, platform } from "./api";
 import type { ViewId } from "./api/mockParams";
 import type {
-  ApplyOptions, Change, Fix, Msg, Plan, Problem, Settings, SettingsSection, Snapshot, Task
+  ApplyOptions, Change, Fix, Msg, Plan, Problem, Settings, SettingsSection, Snapshot, Task, UpdateInfo
 } from "./api/types";
 import { t } from "./i18n";
 import { errorText } from "./lib/errors";
@@ -29,6 +29,8 @@ export interface AppState {
   busy: boolean;
   notices: string[];
   focusTaskId: string | null;
+  /** The latest check for a newer uBot Manager; null until one succeeded. */
+  update: UpdateInfo | null;
 }
 
 export interface AppActions {
@@ -45,6 +47,8 @@ export interface AppActions {
   openSettings(section?: SettingsSection): void;
   closeDialog(): void;
   refresh(): void;
+  /** Asks GitHub for the latest uBot Manager and keeps the answer in `state.update`. Rejects when the check failed; the caller decides whether to tell the user. */
+  checkForUpdate(): Promise<UpdateInfo>;
   runFix(problem: Problem, fix: Fix): void;
   openProject(path?: string): Promise<boolean>;
   cancelTask(id: string): void;
@@ -100,6 +104,7 @@ export function AppProvider(props: { snapshot: Snapshot; settings: Settings; tas
   const [busy, setBusy] = useState(false);
   const [notices, setNotices] = useState<string[]>([]);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
 
   const stateRef = useRef({ pending, settings, dialog, snapshot });
   stateRef.current = { pending, settings, dialog, snapshot };
@@ -251,6 +256,11 @@ export function AppProvider(props: { snapshot: Snapshot; settings: Settings; tas
       setRefreshing(true);
       api.refresh(true).then(setSnapshot, report).finally(() => setRefreshing(false));
     },
+    async checkForUpdate() {
+      const info = await api.checkForUpdate();
+      setUpdate(info);
+      return info;
+    },
     runFix(problem, fix) {
       const action = fix.action;
       switch (action.kind) {
@@ -305,7 +315,7 @@ export function AppProvider(props: { snapshot: Snapshot; settings: Settings; tas
   }, [actions, pending.length]);
 
   const state: AppState = {
-    snapshot, settings, tasks, pending, view, selected, dialog, refreshing, busy, notices, focusTaskId
+    snapshot, settings, tasks, pending, view, selected, dialog, refreshing, busy, notices, focusTaskId, update
   };
   return <AppContext.Provider value={{ state, actions }}>{props.children}</AppContext.Provider>;
 }

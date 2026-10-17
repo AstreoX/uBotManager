@@ -609,6 +609,7 @@ defaults:
   "build": { "engineId": null, "configuration": "Development", "waitForEditor": true,
              "reopenEditor": true, "runTests": false },
   "ros": { "host": "127.0.0.1", "port": 8268, "checkOnRefresh": true },
+  "updates": { "checkOnStart": true },
   "recentProjects": [], "lastProject": null,
   "ignoredProblems": { "<abs .uproject path>": ["legacy:AgentSensorCore"] },
   "userRecipes": [ /* Recipe with user: true */ ]
@@ -639,6 +640,10 @@ of the settings loaded earlier cannot revert them. The file is written with 4-sp
 trailing newline. A settings file that exists but cannot be used (not valid JSON, not an object, locked by
 a sync tool; UTF-8 with or without BOM and UTF-16 with BOM are accepted) leaves the defaults in effect
 and is copied to `settings.json.bad-<unix time>` before the next save replaces it.
+
+`updates.checkOnStart` (default `true`; "Check for a new version of uBot Manager on startup") makes the
+frontend call `check_for_update` once at startup; a failed check is silent. It is the only thing the setting
+controls: the Settings dialog's "Check for Updates" button (About section) always checks.
 
 Language changes take effect after restart (the dialog says so). Theme applies immediately.
 
@@ -757,8 +762,11 @@ export interface Settings {
   install: { directory: string; git: string; usePrebuilt: boolean };
   build: { engineId: string | null; configuration: 'Development' | 'DebugGame'; waitForEditor: boolean; reopenEditor: boolean; runTests: boolean };
   ros: { host: string; port: number; checkOnRefresh: boolean };
+  updates: { checkOnStart: boolean };
   recentProjects: string[]; lastProject: string | null;
 }
+/** Result of `check_for_update`: the running version, the latest published release and whether it is newer. */
+export interface UpdateInfo { current: string; latest: string; available: boolean; url: string }
 export interface IndexSourceConfig { id: string; name: string; location: string; enabled: boolean; builtin: boolean }
 export interface EnvCheck { id: 'git' | 'vs2022' | 'engine' | 'rosBridge'; ok: boolean | null; detail: string | null }
 ```
@@ -810,6 +818,7 @@ lines and shows them in the UI language, and shows everything else (git output, 
 | `save_settings` | `{ settings: Settings }` | `Snapshot` (stores the normalized settings, §6, then refreshes without syncing) |
 | `test_git` | `{ path: string }` | `{ ok: boolean, version: string \| null, error: string \| null }` |
 | `test_ros` | `{ host: string, port: number }` | `{ ok: boolean, error: string \| null }` (TCP connect, 2 s in all; every resolved address is tried, IPv4 first) |
+| `check_for_update` | — | `UpdateInfo`. One HTTPS request to `https://api.github.com/repos/AstreoX/uBotManager/releases/latest` (same fetcher, timeout and redirect rules as index sources, §1.1; proxies from `HTTPS_PROXY`). Only `tag_name`, `draft` and `prerelease` of the reply are read: the tag must be `v` plus a release version (§2 grammar, no prerelease), otherwise the call fails; `url` is rebuilt as `https://github.com/AstreoX/uBotManager/releases/tag/<tag>`, never taken from the reply; `available` is "`latest` is greater than the running version" (`CARGO_PKG_VERSION`). Nothing is downloaded or installed. Fails with an English message when the request fails, and always in `--offline` mode. The frontend learns the running version from the Tauri app API (`getVersion`). |
 | `list_engines` | — | `EngineInfo[]` |
 | `check_environment` | `{ checks: string[] }` | `EnvCheck[]` (one per known requested id, in request order: `git`, `vs2022` via vswhere (any VS 2022 edition, Build Tools included), `engine`; `rosBridge` → `ok: null`, not checked; unknown ids are ignored) |
 | `recipe_changes` | `{ recipeId: string \| null, packages: string[] }` | `Change[]` (install missing, enable disabled; nothing else) |
@@ -1130,7 +1139,8 @@ Structure:
 - Views (tool-window strip): Packages (list + details), Graph, Problems; Tasks opens from the status
   bar; Settings (gear) opens the Settings dialog. Dialogs: Apply Changes (`Plan.dc.html`), Apply
   Recipe (`Welcome.dc.html`), Settings (`Settings.dc.html`). Status bar: breadcrumb, problem count
-  (packages scope; errors and warnings, `info` problems are not counted), update count, pending-changes
+  (packages scope; errors and warnings, `info` problems are not counted), update count, "New version x.y.z"
+  when `check_for_update` found a newer uBot Manager (a click opens Settings at About), pending-changes
   text with Apply… / Discard, Tasks; while a task runs the Tasks view footer shows step text, a progress
   bar, `n/m` and a cancel button. For a `download` step the count is bytes, "12.3 / 45.6 MB" (MB =
   1024 × 1024 bytes, one decimal), and "12.3 MB" with a bar that only runs, without a fill, while the
@@ -1159,11 +1169,16 @@ Structure:
 - Problems: two tabs, Packages and Last Session (the `scope`s), grouped by `Problem.group`; the fixes of
   a `changes` action are queued as pending changes (reviewed through Apply…), `ignore` hides the problem
   for the project, `openSettings` opens the Settings dialog at that section.
-- Settings dialog: sections Appearance, Package Index, Installation, Build, ROS Bridge with a search box;
+- Settings dialog: sections Appearance, Package Index, Installation, Build, ROS Bridge, About with a search box;
   OK / Cancel / Apply. Theme previews immediately and Cancel restores it; the language needs a restart;
   built-in index sources can be reordered but not removed or disabled. Installation has the check box
   "Use prebuilt binaries when available" / "有预编译版本时优先使用" (`install.usePrebuilt`, on by default, §6), saved
-  with the rest. The Installation and ROS Bridge pages test git / the bridge when first opened.
+  with the rest. The Installation and ROS Bridge pages test git / the bridge when first opened. About shows
+  the running version (Tauri `getVersion`), the check box "Check for a new version of uBot Manager on
+  startup" (`updates.checkOnStart`, on by default, §6) and a "Check for Updates" button that shows "up to
+  date", "x.y.z is available" with "Open release page…" (opens `UpdateInfo.url` in the browser), or the error.
+  Nothing is downloaded or installed. The startup check runs once, only when the check box is on, and a
+  failure is silent.
 - Tasks: a project's finished task can be rerun (its changes are planned again) while no task runs; other
   projects' tasks cannot. Projects are matched by path (by name for old records without a path).
   Projects cannot be switched while a task runs (`task.busy`).
@@ -1177,7 +1192,8 @@ Structure:
 - Mock-only URL parameters for screenshots: `lang=en|zh-CN`, `theme=dark|light`,
   `view=packages|graph|problems|tasks`, `dialog=recipes|plan|settings`,
   `section=<settings section>`, `select=<package>`, `noproject=1`, `prebuilt=0` (starts with "Use prebuilt
-  binaries" off, so installs clone and build; the default is on).
+  binaries" off, so installs clone and build; the default is on), `update=1` (the mock's latest release is newer
+  than the running version, so the status bar item and the About page show an available update).
 - Scripts: `npm run dev`, `npm run build` (tsc + vite, output `app/dist`), `npm test` (vitest:
   i18n parity — every key in both files, every `msg.` code from §8 present — and formatting helpers).
 

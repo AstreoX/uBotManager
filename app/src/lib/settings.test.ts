@@ -13,6 +13,7 @@ const settings = (): Settings => ({
   install: { directory: "Plugins/uBot", git: "git", usePrebuilt: false },
   build: { engineId: null, configuration: "Development", waitForEditor: true, reopenEditor: true, runTests: false },
   ros: { host: "127.0.0.1", port: 8268, checkOnRefresh: true },
+  updates: { checkOnStart: true },
   recentProjects: ["E:/A/A.uproject"],
   lastProject: "E:/A/A.uproject"
 });

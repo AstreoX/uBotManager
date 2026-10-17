@@ -121,6 +121,8 @@
     "warnings.other": "{n} problems",
     "updates.one": "1 update available",
     "updates.other": "{n} updates available",
+    "appUpdate": "uBot Manager {version} is available",
+    "appUpdateShort": "New version {version}",
     "cancelTask": "Cancel task"
   },
   "progress": {
@@ -247,6 +249,7 @@
     "install": "Installation",
     "build": "Build",
     "ros": "ROS Bridge",
+    "about": "About",
     "theme": "Theme",
     "language": "Language",
     "restartNote": "Takes effect after restarting uBot Manager",
@@ -279,7 +282,16 @@
     "reachable": "Connected",
     "notReachable": "Not reachable",
     "checkOnRefresh": "Check bridge on refresh",
-    "portInvalid": "Enter a port from 1 to 65535"
+    "portInvalid": "Enter a port from 1 to 65535",
+    "version": "Version",
+    "checkOnStart": "Check for a new version of uBot Manager on startup",
+    "checkNow": "Check for Updates",
+    "checking": "Checking…",
+    "upToDate": "uBot Manager is up to date ({version})",
+    "updateAvailable": "uBot Manager {version} is available",
+    "openRelease": "Open release page…",
+    "checkFailed": "Could not check: {error}",
+    "updatesNote": "A check asks GitHub for the latest release and sends nothing else. Nothing is downloaded or installed."
   },
   "theme": {
     "dark": "Dark",

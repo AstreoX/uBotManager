@@ -4,7 +4,8 @@
 
 import type { GitTestResult, RosTestResult, TaskLogEvent } from "./backend";
 import type {
-  ApplyOptions, Change, EngineInfo, EnvCheck, Plan, SessionStatus, Settings, Snapshot, Task
+  ApplyOptions, Change, EngineInfo, EnvCheck, Plan, SessionStatus, Settings, Snapshot, Task,
+  UpdateInfo
 } from "./types";
 
 export const snapshots: Snapshot[] = [
@@ -1436,6 +1437,9 @@ export const settings: Settings[] = [
       "port": 8268,
       "checkOnRefresh": true
     },
+    "updates": {
+      "checkOnStart": true
+    },
     "recentProjects": [
       "E:/Sims/MyRobotSim/MyRobotSim.uproject"
     ],
@@ -1481,6 +1485,9 @@ export const settings: Settings[] = [
       "port": 8268,
       "checkOnRefresh": true
     },
+    "updates": {
+      "checkOnStart": false
+    },
     "recentProjects": [
       "E:/Sims/MyRobotSim/MyRobotSim.uproject"
     ],
@@ -1525,6 +1532,9 @@ export const settings: Settings[] = [
       "host": "127.0.0.1",
       "port": 8268,
       "checkOnRefresh": true
+    },
+    "updates": {
+      "checkOnStart": true
     },
     "recentProjects": [
       "E:/Sims/MyRobotSim/MyRobotSim.uproject"
@@ -1632,5 +1642,20 @@ export const rosTests: RosTestResult[] = [
   {
     "ok": false,
     "error": "connection refused"
+  }
+];
+
+export const updateInfos: UpdateInfo[] = [
+  {
+    "current": "0.1.1",
+    "latest": "0.1.2",
+    "available": true,
+    "url": "https://github.com/AstreoX/uBotManager/releases/tag/v0.1.2"
+  },
+  {
+    "current": "0.1.1",
+    "latest": "0.1.1",
+    "available": false,
+    "url": "https://github.com/AstreoX/uBotManager/releases/tag/v0.1.1"
   }
 ];

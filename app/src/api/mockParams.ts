@@ -12,6 +12,8 @@ export interface MockParams {
   section: SettingsSection | null;
   select: string | null;
   noProject: boolean;
+  /** `update=1`: the latest release is newer than the running version. */
+  update: boolean;
   /** `prebuilt=0`: start with "Use prebuilt binaries" off, so installs clone and build. */
   prebuilt: boolean;
 }
@@ -27,9 +29,10 @@ export function readMockParams(search: string): MockParams {
     theme: pick(q.get("theme"), ["dark", "light"] as const),
     view: pick(q.get("view"), ["packages", "graph", "problems", "tasks"] as const),
     dialog: pick(q.get("dialog"), ["recipes", "plan", "settings"] as const),
-    section: pick(q.get("section"), ["appearance", "index", "install", "build", "ros"] as const),
+    section: pick(q.get("section"), ["appearance", "index", "install", "build", "ros", "about"] as const),
     select: q.get("select"),
     noProject: q.get("noproject") === "1",
+    update: q.get("update") === "1",
     prebuilt: q.get("prebuilt") !== "0"
   };
 }

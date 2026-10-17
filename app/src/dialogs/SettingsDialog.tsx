@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { api, platform } from "../api";
-import type { EngineInfo, IndexSourceConfig, Settings, SettingsSection } from "../api/types";
+import type { EngineInfo, IndexSourceConfig, Settings, SettingsSection, UpdateInfo } from "../api/types";
 import { sourceName } from "../components/Chrome";
 import { Dialog } from "../components/Dialog";
 import { ArrowDownIcon, ArrowUpIcon, SearchIcon } from "../components/Icons";
 import { getLanguage, t } from "../i18n";
+import { errorText } from "../lib/errors";
 import { parsePort, rebaseSettings, sameJson } from "../lib/settings";
 import { applyTheme, useApp } from "../state";
 
-const SECTIONS: SettingsSection[] = ["appearance", "index", "install", "build", "ros"];
+const SECTIONS: SettingsSection[] = ["appearance", "index", "install", "build", "ros", "about"];
 
 /** Labels searched by the settings filter, per section. */
 const SECTION_TERMS: Record<SettingsSection, string[]> = {
@@ -16,10 +17,13 @@ const SECTION_TERMS: Record<SettingsSection, string[]> = {
   index: ["settings.sources", "settings.syncOnStart", "settings.showPlanned", "settings.name", "settings.location"],
   install: ["settings.installDir", "settings.git", "settings.usePrebuilt"],
   build: ["settings.engine", "settings.configuration", "settings.waitForEditor", "settings.reopenEditor", "settings.runTests"],
-  ros: ["settings.host", "settings.port", "settings.testConnection", "settings.checkOnRefresh"]
+  ros: ["settings.host", "settings.port", "settings.testConnection", "settings.checkOnRefresh"],
+  about: ["settings.version", "settings.checkOnStart", "settings.checkNow"]
 };
 
 const HELP_URL = "https://github.com/AstreoX/uBotManager";
+
+type UpdateCheck = { kind: "idle" } | { kind: "running" } | { kind: "done"; info: UpdateInfo } | { kind: "failed"; text: string };
 
 type TestState = { kind: "idle" } | { kind: "running" } | { kind: "ok"; text: string } | { kind: "failed"; text: string };
 
@@ -42,6 +46,8 @@ export function SettingsDialog(props: { section: SettingsSection }) {
   const portValid = port !== null;
   const [gitTest, setGitTest] = useState<TestState>({ kind: "idle" });
   const [rosTest, setRosTest] = useState<TestState>({ kind: "idle" });
+  const [version, setVersion] = useState("");
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck>(() => (state.update ? { kind: "done", info: state.update } : { kind: "idle" }));
   const tested = useRef(new Set<SettingsSection>());
   const runningLanguage = getLanguage();
 
@@ -51,6 +57,9 @@ export function SettingsDialog(props: { section: SettingsSection }) {
   useEffect(() => {
     api.listEngines().then(setEngines, actions.report);
   }, [actions.report]);
+  useEffect(() => {
+    platform.appVersion().then(setVersion, () => setVersion(""));
+  }, []);
 
   // The backend changes settings behind the dialog: a second launch switches the project (recent projects, the
   // project's ROS host and port), UE edits Config/DefaultUBotROS.ini. Read them when the dialog opens, and
@@ -88,6 +97,13 @@ export function SettingsDialog(props: { section: SettingsSection }) {
     api.testRos(draft.ros.host, draft.ros.port).then(
       (r) => setRosTest(r.ok ? { kind: "ok", text: t("settings.reachable") } : { kind: "failed", text: t("settings.notReachable") }),
       () => setRosTest({ kind: "failed", text: t("settings.notReachable") }));
+  };
+
+  const checkNow = () => {
+    setUpdateCheck({ kind: "running" });
+    actions.checkForUpdate().then(
+      (info) => setUpdateCheck({ kind: "done", info }),
+      (e: unknown) => setUpdateCheck({ kind: "failed", text: errorText(e) }));
   };
 
   useEffect(() => {
@@ -329,6 +345,35 @@ export function SettingsDialog(props: { section: SettingsSection }) {
                   {t("settings.runTests")}
                 </label>
               </div>
+            </div>
+          )}
+
+          {shown === "about" && (
+            <div className="form-grid" style={gridStyle}>
+              <span className="label">{t("settings.version")}</span>
+              <span className="mono">{version || "—"}</span>
+              <span />
+              <label className="check-label">
+                <input type="checkbox" checked={draft.updates.checkOnStart} onChange={() => set((s) => { s.updates.checkOnStart = !s.updates.checkOnStart; return s; })} />
+                {t("settings.checkOnStart")}
+              </label>
+              <span />
+              <div className="inline-row">
+                <button type="button" className="dbtn inline" disabled={updateCheck.kind === "running"} onClick={checkNow}>{t("settings.checkNow")}</button>
+                {updateCheck.kind === "running" && <span className="result c-muted">{t("settings.checking")}</span>}
+                {updateCheck.kind === "failed" && <span className="result c-warning">{t("settings.checkFailed", { error: updateCheck.text })}</span>}
+                {updateCheck.kind === "done" && !updateCheck.info.available && (
+                  <span className="result c-success">{t("settings.upToDate", { version: updateCheck.info.current })}</span>
+                )}
+                {updateCheck.kind === "done" && updateCheck.info.available && (
+                  <>
+                    <span className="result c-success">{t("settings.updateAvailable", { version: updateCheck.info.latest })}</span>
+                    <button type="button" className="link-button" onClick={() => platform.openUrl(updateCheck.info.url)}>{t("settings.openRelease")}</button>
+                  </>
+                )}
+              </div>
+              <span />
+              <span className="c-muted">{t("settings.updatesNote")}</span>
             </div>
           )}
 

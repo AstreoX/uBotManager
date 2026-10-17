@@ -168,6 +168,16 @@ export function StatusBar() {
           <ArrowUpIcon size={13} />{updates.length}
         </button>
       )}
+      {state.update?.available && (
+        <button
+          type="button"
+          className="sb-button update"
+          title={t("status.appUpdate", { version: state.update.latest })}
+          onClick={() => actions.openSettings("about")}
+        >
+          <ArrowUpIcon size={13} />{t("status.appUpdateShort", { version: state.update.latest })}
+        </button>
+      )}
       {pending.length > 0 && (
         <span className="sb-pending" title={pending.map((c) => changeText(c, pkgOf(c.package))).join("\n")}>
           <span className="text">{pendingText}</span>

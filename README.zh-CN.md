@@ -114,4 +114,4 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 - Committers and reviewers: [AstreoX](https://github.com/AstreoX)
 - Approvers: [AstreoX](https://github.com/AstreoX)
 
-隐私说明：uBot Manager 不收集、不发送任何个人信息或使用数据。它只在两种情况下联网：同步包索引（默认启动时同步，可以在 `设置 > Package 索引 > 启动时同步索引` 关闭，也可以点刷新按钮手动同步）；安装或更新 Package 时，从索引里写的地址下载预编译包或克隆仓库（默认都在 GitHub）。向 GitHub 发出的请求适用 [GitHub General Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)。
+隐私说明：uBot Manager 不收集、不发送任何个人信息或使用数据。它只在三种情况下联网：同步包索引（默认启动时同步，可以在 `设置 > Package 索引 > 启动时同步索引` 关闭，也可以点刷新按钮手动同步）；安装或更新 Package 时，从索引里写的地址下载预编译包或克隆仓库（默认都在 GitHub）；检查 uBot Manager 自己有没有新版本（向 GitHub Releases 接口 `api.github.com` 询问最新的发布版本，默认启动时检查一次，可以在 `设置 > 关于 > 启动时检查 uBot Manager 有没有新版本` 关闭，也可以点「检查更新」手动检查；请求里只带程序名和版本号，不会下载或安装任何东西）。向 GitHub 发出的请求适用 [GitHub General Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)。

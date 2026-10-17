@@ -50,7 +50,7 @@ export interface Recipe {
 }
 
 export type Severity = 'error' | 'warning' | 'info';
-export type SettingsSection = 'appearance' | 'index' | 'install' | 'build' | 'ros';
+export type SettingsSection = 'appearance' | 'index' | 'install' | 'build' | 'ros' | 'about';
 export interface ProblemFact { label: Msg; value: string; valueMsg: Msg | null }
 export type FixAction =
   | { kind: 'changes'; changes: Change[] }
@@ -107,7 +107,10 @@ export interface Settings {
   install: { directory: string; git: string; usePrebuilt: boolean };
   build: { engineId: string | null; configuration: 'Development' | 'DebugGame'; waitForEditor: boolean; reopenEditor: boolean; runTests: boolean };
   ros: { host: string; port: number; checkOnRefresh: boolean };
+  updates: { checkOnStart: boolean };
   recentProjects: string[]; lastProject: string | null;
 }
+/** Result of `check_for_update`: the running version, the latest published release and whether it is newer. */
+export interface UpdateInfo { current: string; latest: string; available: boolean; url: string }
 export interface IndexSourceConfig { id: string; name: string; location: string; enabled: boolean; builtin: boolean }
 export interface EnvCheck { id: 'git' | 'vs2022' | 'engine' | 'rosBridge'; ok: boolean | null; detail: string | null }

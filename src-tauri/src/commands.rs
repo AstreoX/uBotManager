@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 use ubot_core::model::{
     ApplyOptions, Change, EngineInfo, EnvCheck, GitTestResult, Msg, Plan, RosTestResult, Settings,
-    Snapshot, Task,
+    Snapshot, Task, UpdateInfo,
 };
 use ubot_core::Manager;
 
@@ -179,6 +179,11 @@ pub async fn test_ros(
     port: u16,
 ) -> CommandResult<RosTestResult> {
     with_manager(state, move |manager| Ok(manager.test_ros(&host, port))).await
+}
+
+#[tauri::command]
+pub async fn check_for_update(state: State<'_, AppState>) -> CommandResult<UpdateInfo> {
+    with_manager(state, |manager| manager.check_for_update()).await
 }
 
 #[tauri::command]

@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { Backend, GitTestResult, Platform, RosTestResult, TaskLogEvent, Unlisten } from "./backend";
-import type { ApplyOptions, Change, EngineInfo, EnvCheck, Msg, Plan, Settings, Snapshot, Task } from "./types";
+import type {
+  ApplyOptions, Change, EngineInfo, EnvCheck, Msg, Plan, Settings, Snapshot, Task, UpdateInfo
+} from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unlisten {
   let disposed = false;
@@ -35,6 +38,7 @@ export const tauriBackend: Backend = {
   saveSettings: (settings: Settings) => invoke<Snapshot>("save_settings", { settings }),
   testGit: (path: string) => invoke<GitTestResult>("test_git", { path }),
   testRos: (host: string, port: number) => invoke<RosTestResult>("test_ros", { host, port }),
+  checkForUpdate: () => invoke<UpdateInfo>("check_for_update"),
   listEngines: () => invoke<EngineInfo[]>("list_engines"),
   checkEnvironment: (checks: string[]) => invoke<EnvCheck[]>("check_environment", { checks }),
   recipeChanges: (recipeId: string | null, packages: string[]) =>
@@ -74,6 +78,7 @@ export const tauriPlatform: Platform = {
     const picked = await open({ title, multiple: false, directory: false, filters: [{ name: filterName, extensions: ["uproject"] }] });
     return typeof picked === "string" ? picked : null;
   },
+  appVersion: () => getVersion(),
   openUrl: (url) => run(openUrl(url)),
   openPath: (path) => run(openPath(path)),
   revealPath: (path) => run(revealItemInDir(path))

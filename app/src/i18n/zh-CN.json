@@ -121,6 +121,8 @@
     "warnings.other": "{n} 个问题",
     "updates.one": "1 个更新",
     "updates.other": "{n} 个更新",
+    "appUpdate": "uBot Manager {version} 已发布",
+    "appUpdateShort": "新版本 {version}",
     "cancelTask": "取消任务"
   },
   "progress": {
@@ -247,6 +249,7 @@
     "install": "安装",
     "build": "编译",
     "ros": "ROS 桥接",
+    "about": "关于",
     "theme": "主题",
     "language": "语言",
     "restartNote": "重启 uBot Manager 后生效",
@@ -279,7 +282,16 @@
     "reachable": "已连接",
     "notReachable": "无法连接",
     "checkOnRefresh": "刷新时检查桥接",
-    "portInvalid": "请输入 1–65535 之间的端口"
+    "portInvalid": "请输入 1–65535 之间的端口",
+    "version": "版本",
+    "checkOnStart": "启动时检查 uBot Manager 有没有新版本",
+    "checkNow": "检查更新",
+    "checking": "正在检查…",
+    "upToDate": "uBot Manager 已是最新版本（{version}）",
+    "updateAvailable": "uBot Manager {version} 已发布",
+    "openRelease": "打开发布页面…",
+    "checkFailed": "无法检查：{error}",
+    "updatesNote": "检查时只向 GitHub 询问最新的发布版本，不发送其他信息，也不会下载或安装任何东西。"
   },
   "theme": {
     "dark": "深色",

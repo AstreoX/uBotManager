@@ -64,7 +64,7 @@ describe("layoutGraph edges", () => {
   it("keep clear of each other in the mock scenario, with a project and without", async () => {
     for (const noProject of [false, true]) {
       const { backend } = createMockBackend({
-        lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject, prebuilt: true
+        lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject, update: false, prebuilt: true
       });
       const layout = layoutOf(await backend.getSnapshot());
       expect(layout.edges.length).toBeGreaterThan(0);

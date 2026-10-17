@@ -11,7 +11,7 @@ import type { Backend } from "./backend";
 import type { Snapshot } from "./types";
 
 const params: MockParams = {
-  lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject: false, prebuilt: true
+  lang: null, theme: null, view: null, dialog: null, section: null, select: null, noProject: false, update: false, prebuilt: true
 };
 const SCENARIO = "D:\\Projects\\MyRobotSim\\MyRobotSim.uproject";
 const WAREHOUSE = "D:\\Projects\\WarehouseBot\\WarehouseBot.uproject";
@@ -280,6 +280,21 @@ describe("mock index", () => {
     for (const name of ["Sensors Only", "ROS 2 Sensors", "ROS Ground Robot", "LLM Drone", "Smoke Combat Demo"]) {
       expect(names).toContain(name);
     }
+  });
+
+  it("checks for a newer uBot Manager: up to date by default, newer with update=1", async () => {
+    const same = await createMockBackend(params).backend.checkForUpdate();
+    expect(same.available).toBe(false);
+    expect(same.latest).toBe(same.current);
+    const newer = await createMockBackend({ ...params, update: true }).backend.checkForUpdate();
+    expect(newer.available).toBe(true);
+    expect(newer.latest).not.toBe(newer.current);
+    expect(newer.url).toMatch(/^https:\/\/github\.com\/AstreoX\/uBotManager\/releases\/tag\/v/);
+  });
+
+  it("starts with the update check on", async () => {
+    const { backend } = createMockBackend(params);
+    expect((await backend.getSettings()).updates.checkOnStart).toBe(true);
   });
 });
 

@@ -44,7 +44,7 @@ use crate::git;
 use crate::index::MergedIndex;
 use crate::model::{
     ApplyOptions, Change, EngineInfo, EnvCheck, GitTestResult, IndexSourceConfig, Msg, Plan,
-    RosTestResult, Settings, Snapshot, StepStatus, Task,
+    RosTestResult, Settings, Snapshot, StepStatus, Task, UpdateInfo,
 };
 use crate::msg::{msg, msg0, render_en};
 use crate::paths::{self, AppDirs};
@@ -55,6 +55,7 @@ use crate::recipes;
 use crate::settings::{self, SettingsStore};
 use crate::sources::{self, Fetcher, HttpFetcher, LoadContext};
 use crate::status;
+use crate::update;
 use crate::workspace::{ProjectContext, RosCheck, Workspace};
 
 pub type ApiResult<T> = Result<T, String>;
@@ -576,6 +577,18 @@ impl Manager {
         env::test_ros(host, port)
     }
 
+    /// `check_for_update`: one request to the GitHub Releases API for the latest uBot Manager
+    /// (SPEC §7). It never downloads or installs anything.
+    pub fn check_for_update(&self) -> ApiResult<UpdateInfo> {
+        if self.inner.options.offline {
+            return Err("offline: not checking for updates".into());
+        }
+        update::check(
+            self.inner.options.fetcher.as_ref(),
+            update::current_version(),
+        )
+    }
+
     /// `list_engines`: launcher installs and registered source builds.
     pub fn list_engines(&self) -> Vec<EngineInfo> {
         engine::list_engines(self.inner.options.engine_registry.as_ref())
@@ -1064,5 +1077,34 @@ mod tests {
             Path::new(manager.get_settings().last_project.as_deref().unwrap()),
             &b
         ));
+    }
+
+    struct LatestRelease(&'static str);
+
+    impl Fetcher for LatestRelease {
+        fn fetch(&self, url: &str) -> Result<String, String> {
+            assert_eq!(url, update::LATEST_RELEASE_API);
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[test]
+    fn check_for_update_asks_github_and_never_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = ManagerOptions {
+            dirs: AppDirs::under(dir.path().to_path_buf()),
+            fetcher: Arc::new(LatestRelease(r#"{ "tag_name": "v999.0.0" }"#)),
+            ..ManagerOptions::default()
+        };
+        let info = Manager::new(options.clone()).check_for_update().unwrap();
+        assert!(info.available);
+        assert_eq!(info.current, update::current_version());
+        assert_eq!(info.latest, "999.0.0");
+
+        let offline = ManagerOptions {
+            offline: true,
+            ..options
+        };
+        assert!(Manager::new(offline).check_for_update().is_err());
     }
 }

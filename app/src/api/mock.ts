@@ -13,7 +13,7 @@ import type { MockParams } from "./mockParams";
 import indexFile from "./mockIndex.json";
 import type {
   ApplyOptions, Change, EngineInfo, EnvCheck, Fix, IndexSourceStatus, Layer, Msg, PackageInfo, Plan,
-  PlanStep, PluginInfo, Problem, Recipe, Requirement, Settings, Snapshot, StepGroup, StepKind, Task, TaskStep
+  PlanStep, PluginInfo, Problem, Recipe, Requirement, Settings, Snapshot, StepGroup, StepKind, Task, TaskStep, UpdateInfo
 } from "./types";
 
 interface IndexRequire { name: string; version: string; optional?: boolean }
@@ -56,6 +56,10 @@ interface ProjectState {
 }
 
 const REMOTE_INDEX = "https://raw.githubusercontent.com/AstreoX/uBotCore/main/Index/index.json";
+/** The version the mock pretends to run; `update=1` makes the latest release newer. */
+export const MOCK_APP_VERSION = "0.1.1";
+const MOCK_NEXT_VERSION = "0.1.2";
+const RELEASE_PAGE = "https://github.com/AstreoX/uBotManager/releases/tag/v";
 const SCENARIO_PROJECT = "D:\\Projects\\MyRobotSim\\MyRobotSim.uproject";
 const ENGINES: EngineInfo[] = [
   { id: "5.5", version: "5.5.4", root: "C:\\Program Files\\Epic Games\\UE_5.5", kind: "launcher" },
@@ -219,6 +223,7 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     install: { directory: "Plugins/uBot", git: "git", usePrebuilt: params.prebuilt },
     build: { engineId: null, configuration: "Development", waitForEditor: true, reopenEditor: true, runTests: false },
     ros: { host: "127.0.0.1", port: 8268, checkOnRefresh: true },
+    updates: { checkOnStart: true },
     recentProjects: [SCENARIO_PROJECT, "D:\\Projects\\WarehouseBot\\WarehouseBot.uproject"],
     lastProject: params.noProject ? null : SCENARIO_PROJECT
   };
@@ -1389,6 +1394,11 @@ export function createMockBackend(params: MockParams): { backend: Backend; initi
     async testRos(host, port): Promise<RosTestResult> {
       await delay(600);
       return { ok: false, error: `Connection to ${host}:${port} refused` };
+    },
+    async checkForUpdate(): Promise<UpdateInfo> {
+      await delay(400);
+      const latest = params.update ? MOCK_NEXT_VERSION : MOCK_APP_VERSION;
+      return { current: MOCK_APP_VERSION, latest, available: params.update, url: `${RELEASE_PAGE}${latest}` };
     },
     async listEngines() {
       return clone(ENGINES);

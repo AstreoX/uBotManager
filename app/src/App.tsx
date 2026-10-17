@@ -18,7 +18,9 @@ export function App() {
     if (started.current) return;
     started.current = true;
     if (state.settings.index.syncOnStart) actions.refresh();
-  }, [state.settings.index.syncOnStart, actions]);
+    // settings.updates.checkOnStart: ask GitHub for a newer uBot Manager once; a failure is silent.
+    if (state.settings.updates.checkOnStart) actions.checkForUpdate().catch(() => undefined);
+  }, [state.settings.index.syncOnStart, state.settings.updates.checkOnStart, actions]);
 
   const { dialog } = state;
   return (

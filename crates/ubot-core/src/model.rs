@@ -588,6 +588,13 @@ pub struct RosSettings {
     pub check_on_refresh: bool,
 }
 
+/// Settings group `updates` (SPEC §6): whether the app looks for a newer uBot Manager at startup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateSettings {
+    pub check_on_start: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -597,6 +604,7 @@ pub struct Settings {
     pub install: InstallSettings,
     pub build: BuildSettings,
     pub ros: RosSettings,
+    pub updates: UpdateSettings,
     pub recent_projects: Vec<String>,
     pub last_project: Option<String>,
 }
@@ -637,6 +645,20 @@ pub struct GitTestResult {
     pub ok: bool,
     pub version: Option<String>,
     pub error: Option<String>,
+}
+
+/// Result of `check_for_update` (SPEC §7): the running version, the latest published release and
+/// whether the latter is newer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    /// The running version, "0.1.1".
+    pub current: String,
+    /// The latest published release, "0.1.1".
+    pub latest: String,
+    pub available: bool,
+    /// The GitHub release page of `latest`.
+    pub url: String,
 }
 
 /// Result of `test_ros`.
@@ -1148,6 +1170,9 @@ mod tests {
                 port: 8268,
                 check_on_refresh: true,
             },
+            updates: UpdateSettings {
+                check_on_start: true,
+            },
             recent_projects: vec![],
             last_project: None,
         };
@@ -1161,6 +1186,7 @@ mod tests {
                 "install",
                 "build",
                 "ros",
+                "updates",
                 "recentProjects",
                 "lastProject"
             ]

@@ -68,6 +68,7 @@ fn main() {
             commands::save_settings,
             commands::test_git,
             commands::test_ros,
+            commands::check_for_update,
             commands::list_engines,
             commands::check_environment,
             commands::recipe_changes,

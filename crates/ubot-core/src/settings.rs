@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BuildConfiguration, BuildSettings, IndexSettings, IndexSourceConfig, InstallSettings, Lang,
-    Recipe, RosSettings, Settings, Theme,
+    Recipe, RosSettings, Settings, Theme, UpdateSettings,
 };
 use crate::paths::{self, AppDirs};
 
@@ -86,6 +86,14 @@ impl Default for RosSettings {
     }
 }
 
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        UpdateSettings {
+            check_on_start: true,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -95,6 +103,7 @@ impl Default for Settings {
             install: InstallSettings::default(),
             build: BuildSettings::default(),
             ros: RosSettings::default(),
+            updates: UpdateSettings::default(),
             recent_projects: Vec::new(),
             last_project: None,
         }
@@ -251,6 +260,7 @@ impl SettingsStore {
             install: section(&raw, "install", defaults.install, |_| {}),
             build: section(&raw, "build", defaults.build, |_| {}),
             ros: section(&raw, "ros", defaults.ros, |_| {}),
+            updates: section(&raw, "updates", defaults.updates, |_| {}),
             recent_projects: field(&raw, "recentProjects", defaults.recent_projects),
             last_project: field(&raw, "lastProject", defaults.last_project),
         };
@@ -685,6 +695,33 @@ mod tests {
         assert_eq!(saved["recentProjects"].as_array().unwrap().len(), 1);
         assert_eq!(saved["lastProject"], saved["recentProjects"][0]);
         assert_eq!(saved["build"]["engineId"], Value::Null);
+    }
+
+    #[test]
+    fn the_update_check_is_on_unless_the_file_says_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::under(dir.path().to_path_buf());
+        assert!(SettingsStore::load(&dirs).settings.updates.check_on_start);
+
+        std::fs::write(
+            dirs.settings_file(),
+            json!({ "updates": { "checkOnStart": false } }).to_string(),
+        )
+        .unwrap();
+        let mut store = SettingsStore::load(&dirs);
+        assert!(!store.settings.updates.check_on_start);
+        store.save().unwrap();
+        assert!(!SettingsStore::load(&dirs).settings.updates.check_on_start);
+
+        std::fs::write(
+            dirs.settings_file(),
+            json!({ "updates": { "checkOnStart": "no" } }).to_string(),
+        )
+        .unwrap();
+        assert!(
+            SettingsStore::load(&dirs).settings.updates.check_on_start,
+            "a wrongly typed value is the default"
+        );
     }
 
     #[test]

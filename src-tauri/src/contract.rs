@@ -19,7 +19,8 @@ use ubot_core::model::{
     Msg, PackageInfo, PackageState, Plan, PlanStep, PluginInfo, PrebuiltInfo, Problem, ProblemFact,
     ProblemScope, Progress, ProjectInfo, Recipe, Requirement, RequirementKind, RequirementStatus,
     RosSettings, RosTestResult, SessionKind, SessionStatus, Settings, SettingsSection, Severity,
-    Snapshot, StepGroup, StepKind, StepStatus, Task, TaskLogEvent, TaskStep, Theme,
+    Snapshot, StepGroup, StepKind, StepStatus, Task, TaskLogEvent, TaskStep, Theme, UpdateInfo,
+    UpdateSettings,
 };
 
 const FIXTURE: &str = concat!(
@@ -539,6 +540,9 @@ fn settings() -> Vec<Settings> {
                 port: 8268,
                 check_on_refresh: true,
             },
+            updates: UpdateSettings {
+                check_on_start: position != 1,
+            },
             recent_projects: vec!["E:/Sims/MyRobotSim/MyRobotSim.uproject".into()],
             last_project: (position == 0).then(|| "E:/Sims/MyRobotSim/MyRobotSim.uproject".into()),
         })
@@ -588,6 +592,23 @@ fn ros_tests() -> Vec<RosTestResult> {
     ]
 }
 
+fn update_infos() -> Vec<UpdateInfo> {
+    vec![
+        UpdateInfo {
+            current: "0.1.1".into(),
+            latest: "0.1.2".into(),
+            available: true,
+            url: "https://github.com/AstreoX/uBotManager/releases/tag/v0.1.2".into(),
+        },
+        UpdateInfo {
+            current: "0.1.1".into(),
+            latest: "0.1.1".into(),
+            available: false,
+            url: "https://github.com/AstreoX/uBotManager/releases/tag/v0.1.1".into(),
+        },
+    ]
+}
+
 fn task_log_events() -> Vec<TaskLogEvent> {
     vec![TaskLogEvent {
         task_id: "task-1".into(),
@@ -622,6 +643,7 @@ fn entries() -> Vec<(&'static str, &'static str, String)> {
         ),
         ("gitTests", "GitTestResult[]", json(&git_tests())),
         ("rosTests", "RosTestResult[]", json(&ros_tests())),
+        ("updateInfos", "UpdateInfo[]", json(&update_infos())),
     ]
 }
 
@@ -631,7 +653,7 @@ fn render_fixture() -> String {
          // Do not edit: run `UBOT_UPDATE_CONTRACT=1 cargo test -p ubot-manager contract` instead.\n\
          // contract.test.ts type-checks this file against types.ts (SPEC §7).\n\n\
          import type { GitTestResult, RosTestResult, TaskLogEvent } from \"./backend\";\n\
-         import type {\n  ApplyOptions, Change, EngineInfo, EnvCheck, Plan, SessionStatus, Settings, Snapshot, Task\n\
+         import type {\n  ApplyOptions, Change, EngineInfo, EnvCheck, Plan, SessionStatus, Settings, Snapshot, Task,\n  UpdateInfo\n\
          } from \"./types\";\n",
     );
     for (name, ty, json) in entries() {

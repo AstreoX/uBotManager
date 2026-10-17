@@ -25,6 +25,7 @@ pub mod recipes;
 pub mod settings;
 pub mod sources;
 pub mod status;
+pub mod update;
 pub mod uproject;
 pub mod url;
 pub mod version;

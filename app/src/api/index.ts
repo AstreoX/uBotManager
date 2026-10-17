@@ -1,5 +1,5 @@
 import type { Backend, Platform } from "./backend";
-import { createMockBackend } from "./mock";
+import { createMockBackend, MOCK_APP_VERSION } from "./mock";
 import { readMockParams, type MockParams } from "./mockParams";
 import { tauriBackend, tauriPlatform } from "./tauri";
 import type { Change } from "./types";
@@ -15,6 +15,7 @@ const browserPlatform: Platform = {
   closeWindow: () => undefined,
   onMaximizedChange: () => () => undefined,
   pickProjectFile: async (title) => window.prompt(title)?.trim() || null,
+  appVersion: async () => MOCK_APP_VERSION,
   openUrl: (url) => void window.open(url, "_blank", "noopener"),
   openPath: () => undefined,
   revealPath: () => undefined

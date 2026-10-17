@@ -119,6 +119,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 Privacy policy: uBot Manager does not collect or send personal data, usage data or telemetry. It connects to other systems only to:
 
 - download the package index, by default from `raw.githubusercontent.com`: at startup (can be turned off with *Settings > Package Index > Sync index on startup*) and when you click the refresh button;
-- download prebuilt packages or clone package repositories from the addresses listed in the index (by default `github.com`) when you install or update packages.
+- download prebuilt packages or clone package repositories from the addresses listed in the index (by default `github.com`) when you install or update packages;
+- ask the GitHub Releases API (`api.github.com`) for the latest uBot Manager release: once at startup (can be turned off with *Settings > About > Check for a new version of uBot Manager on startup*) and when you click *Check for Updates*. The request carries the app name and version as its user agent and nothing else; nothing is downloaded or installed.
 
 Requests to GitHub are covered by the [GitHub General Privacy Statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement).

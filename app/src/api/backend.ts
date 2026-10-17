@@ -1,5 +1,5 @@
 import type {
-  ApplyOptions, Change, EngineInfo, EnvCheck, Msg, Plan, Settings, Snapshot, Task
+  ApplyOptions, Change, EngineInfo, EnvCheck, Msg, Plan, Settings, Snapshot, Task, UpdateInfo
 } from "./types";
 
 export interface TaskLogEvent { taskId: string; stepId: string; lines: string[] }
@@ -24,6 +24,8 @@ export interface Backend {
   saveSettings(settings: Settings): Promise<Snapshot>;
   testGit(path: string): Promise<GitTestResult>;
   testRos(host: string, port: number): Promise<RosTestResult>;
+  /** One request to GitHub for the latest uBot Manager release; never downloads or installs anything. */
+  checkForUpdate(): Promise<UpdateInfo>;
   listEngines(): Promise<EngineInfo[]>;
   checkEnvironment(checks: string[]): Promise<EnvCheck[]>;
   recipeChanges(recipeId: string | null, packages: string[]): Promise<Change[]>;
@@ -42,6 +44,8 @@ export interface Platform {
   onMaximizedChange(handler: (maximized: boolean) => void): Unlisten;
   /** Asks for a `.uproject` file; resolves to null when the user cancels. */
   pickProjectFile(title: string, filterName: string): Promise<string | null>;
+  /** The version of the running app. */
+  appVersion(): Promise<string>;
   openUrl(url: string): void;
   openPath(path: string): void;
   revealPath(path: string): void;
