@@ -4484,7 +4484,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ubot-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "ubot-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4517,7 +4517,7 @@ dependencies = [
 
 [[package]]
 name = "ubot-manager"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glob",
  "serde",
