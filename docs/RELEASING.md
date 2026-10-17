@@ -65,3 +65,32 @@ ubot package <Name[@版本]>... --out <目录> [--engine <5.5 | 引擎根目录>
 5. 工作流最后生成一个草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
 
 手动运行工作流（Actions 页的 *Run workflow*）只构建，安装包留在这次运行的 Artifacts 里，不生成 Release。
+
+## 启用代码签名（SignPath Foundation）
+
+Release 工作流已经接好签名步骤；仓库变量没设置时跳过。SignPath Foundation 通过申请、发来邀请之后：
+
+1. 在 SignPath 里建项目，记下组织 ID、项目 slug 和签名策略 slug：
+   - 项目的可信构建系统选 GitHub.com，按提示给 `AstreoX/uBotManager` 安装并连接 SignPath 的 GitHub 应用。
+   - 把下面的 artifact configuration 设为项目的默认配置。工作流的两次签名请求各上传一个只含一个 `.exe` 的压缩包（先是 `ubot-manager.exe`，再是安装包），并带参数 `version`；产品名和版本写成文件元数据限制。
+   - 签名策略要求手动批准，批准人是维护者本人。
+2. 在 SignPath 里给构建用的账号生成 API token。
+3. 在仓库的 *Settings > Secrets and variables > Actions* 里设置变量 `SIGNPATH_ORGANIZATION_ID`、`SIGNPATH_PROJECT_SLUG`、`SIGNPATH_SIGNING_POLICY_SLUG` 和密钥 `SIGNPATH_API_TOKEN`。
+4. 在 Actions 页手动运行一次 *Release*（只构建，不生成 Release），在 SignPath 里批准两次签名请求，确认两个文件的签名状态都是有效。
+5. 之后按 [发布 uBot Manager](#发布-ubot-manager) 发布；去掉 README 和文档站里「安装包未签名」的说明。
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="*.exe" product-name="uBot Manager" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
+```
+
+`product-name` 要和 `src-tauri/tauri.conf.json` 里的 `productName` 一致，`version` 是工作流从同一个文件读出来的版本号。
