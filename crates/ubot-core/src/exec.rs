@@ -1338,7 +1338,9 @@ pub fn parse_progress(line: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BuildConfiguration, Plan, PlanStep, StepGroup, StepKind};
+    #[cfg(windows)]
+    use crate::model::BuildConfiguration;
+    use crate::model::{Plan, PlanStep, StepGroup, StepKind};
     use crate::msg::msg;
     use std::sync::atomic::AtomicUsize;
 

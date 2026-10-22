@@ -66,6 +66,78 @@ fn descriptor(version: &str, layer: &str, requires: &str) -> String {
 }
 
 #[test]
+fn apply_rejects_conflicting_explicit_installs_before_starting_a_task() {
+    for reverse in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project_dir = root.join("Project");
+        let uproject = project_dir.join("Sim.uproject");
+        let original = "{\n    \"FileVersion\": 3,\n    \"EngineAssociation\": \"\"\n}\n";
+        write(&uproject, original);
+        let index = root.join("index.json");
+        write(
+            &index,
+            include_str!("fixtures/install-version-constraints.json"),
+        );
+        let home = root.join("home");
+        // Offline only blocks index fetching. If the gate regresses, even the failing test must
+        // never launch real git or fetch an archive.
+        let missing_git = root.join("git-must-not-run");
+        assert!(!missing_git.exists());
+        write(
+            &home.join("settings.json"),
+            &serde_json::json!({
+                "install": { "git": missing_git, "usePrebuilt": false },
+                "ros": { "checkOnRefresh": false }
+            })
+            .to_string(),
+        );
+        let manager = Manager::new(ManagerOptions {
+            dirs: AppDirs::under(home.clone()),
+            offline: true,
+            index_override: Some(vec![index.to_string_lossy().into_owned()]),
+            engine_registry: Arc::new(NoEngines),
+            ..ManagerOptions::default()
+        });
+        manager.open_project(&uproject.to_string_lossy()).unwrap();
+        let sink = Arc::new(Sink::default());
+        let mut changes = vec![
+            Change::new(ChangeKind::Install, "UBotROS", Some("0.1.3".into())),
+            Change::new(ChangeKind::Install, "UBotCore", Some("0.1.0".into())),
+        ];
+        if reverse {
+            changes.reverse();
+        }
+        // Deliberately call apply directly: it must enforce the gate without a prior plan.
+        let result = manager.apply(
+            &changes,
+            &ApplyOptions {
+                build: false,
+                reopen_editor: false,
+                run_tests: false,
+            },
+            None,
+            None,
+            sink.clone(),
+        );
+        if let Ok(id) = &result {
+            manager.wait_for_task(id);
+        }
+        let error = result.expect_err("a conflicting plan must not start a task");
+        assert!(
+            error.contains("UBotROS requires UBotCore ^0.1.3."),
+            "{error}"
+        );
+        assert!(manager.list_tasks().is_empty());
+        assert!(sink.tasks.lock().unwrap().is_empty());
+        assert!(sink.lines.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&uproject).unwrap(), original);
+        assert!(!project_dir.join("Plugins").exists());
+        assert!(!home.join("tasks.json").exists());
+    }
+}
+
+#[test]
 fn facade_round_trip() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

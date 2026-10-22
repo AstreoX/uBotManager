@@ -119,6 +119,10 @@ pub const EN: &[(&str, &str)] = &[
         "{dependent} requires {package} {range}.",
     ),
     (
+        "plan.requestedVersionChanged",
+        "Requested {package} {requested}, but the plan resolved {resolved}.",
+    ),
+    (
         "plan.alsoDisable",
         "Disabling {package} also disables {dependents}.",
     ),
@@ -301,5 +305,20 @@ mod tests {
         assert_eq!(codes.len(), count);
         assert!(is_known_code(VERBATIM_CODE));
         assert_eq!(en_template(VERBATIM_CODE), Some("{text}"));
+    }
+
+    #[test]
+    fn renders_requested_version_changed() {
+        assert_eq!(
+            render_en(&msg(
+                "plan.requestedVersionChanged",
+                &[
+                    ("package", "UBotCore"),
+                    ("requested", "0.1.3"),
+                    ("resolved", "0.1.4"),
+                ],
+            )),
+            "Requested UBotCore 0.1.3, but the plan resolved 0.1.4."
+        );
     }
 }

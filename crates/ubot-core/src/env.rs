@@ -181,7 +181,9 @@ mod tests {
         drop(listener);
         let result = test_ros("127.0.0.1", port);
         assert!(!result.ok && result.error.is_some());
-        assert!(!test_ros("bad host name", 1).ok);
+        // NUL is rejected before DNS: local wildcard resolvers may resolve even invalid names.
+        let invalid = test_ros("bad\0host", 1);
+        assert!(!invalid.ok && invalid.error.is_some());
         // "localhost" can resolve to ::1 before 127.0.0.1; a bridge on IPv4 must still be found.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

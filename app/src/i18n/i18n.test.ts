@@ -26,7 +26,7 @@ const SPEC_CODES = [
   "plan.folderExists", "plan.unsafeUrl", "plan.noEngine", "plan.engineVersion", "plan.outsideProject", "plan.pluginRoot",
   "plan.notPluginDir", "plan.gitUnreadable", "plan.unsafeRef", "plan.unsafeName", "plan.unsafeProjectName",
   "plan.unsafeBuildPath", "plan.projectReadOnly", "plan.noProject", "plan.prebuiltUnavailable", "plan.noPrebuilt",
-  "plan.noCompiler",
+  "plan.noCompiler", "plan.requestedVersionChanged",
   "task.apply", "task.recipe", "task.install", "task.busy", "task.editorRunning",
   // Verbatim text (session messages, anything the core has no code for), shown as it is.
   "text"
@@ -50,6 +50,7 @@ const SPEC_PARAMS: Record<string, string[]> = {
   "step.build": ["target"],
   "step.build.detail": ["platform", "configuration"],
   "plan.breaksDependent": ["package", "dependent", "range"],
+  "plan.requestedVersionChanged": ["package", "requested", "resolved"],
   "plan.engineVersion": ["package", "version", "range", "engine"],
   "plan.pluginRoot": ["path"],
   "plan.notPluginDir": ["path"],
@@ -232,6 +233,12 @@ describe("translation", () => {
     expect(renderMsg("zh-CN", mismatch)).toBe("UBotCombat 安装的是 UE 5.4 的预编译版本，但此项目使用 UE 5.5。");
     expect(renderMsg("zh-CN", { code: "fix.reinstall", params: { package: "UBotCombat" } })).toBe("重新安装 UBotCombat");
     expect(renderMsg("zh-CN", { code: "plan.noCompiler", params: {} })).toBe("需要编译 C++，但没有找到 Visual Studio 2022。");
+  });
+
+  it("renders an explicit install version mismatch in both languages", () => {
+    const msg = { code: "plan.requestedVersionChanged", params: { package: "UBotCore", requested: "0.1.3", resolved: "0.1.4" } };
+    expect(renderMsg("en", msg)).toBe("Requested UBotCore 0.1.3, but the plan resolved 0.1.4.");
+    expect(renderMsg("zh-CN", msg)).toBe("已指定 UBotCore 0.1.3，但计划解析为 0.1.4。");
   });
 
   it("renders verbatim text as it is", () => {
