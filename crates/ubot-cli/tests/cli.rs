@@ -41,6 +41,33 @@ struct Env {
 }
 
 impl Env {
+    /// No plugins or user settings; all acquisition paths are inert even if apply's gate fails.
+    fn empty(root: &Path) -> Env {
+        let cwd = root.join("shell");
+        let project = root.join("Project/Sim.uproject");
+        let home = root.join("home");
+        write(
+            &project,
+            "{\n    \"FileVersion\": 3,\n    \"EngineAssociation\": \"\"\n}\n",
+        );
+        write(
+            &cwd.join("idx.json"),
+            include_str!("../../ubot-core/tests/fixtures/install-version-constraints.json"),
+        );
+        let missing_git = root.join("git-must-not-run");
+        assert!(!missing_git.exists());
+        write(
+            &home.join("settings.json"),
+            &serde_json::json!({
+                "language": "en",
+                "install": { "git": missing_git, "usePrebuilt": false },
+                "ros": { "checkOnRefresh": false }
+            })
+            .to_string(),
+        );
+        Env { cwd, project, home }
+    }
+
     /// A project with UBotCore and UBotSensor installed and enabled, an index file `idx.json`
     /// in `cwd` (not in the project).
     fn new(root: &Path) -> Env {
@@ -100,6 +127,57 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn explicit_install_conflicts_are_reported_in_json() {
+    for reverse in [false, true] {
+        for apply in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let env = Env::empty(temp.path());
+            let original = fs::read(&env.project).unwrap();
+            let mut changes = ["install:UBotROS@0.1.3", "install:UBotCore@0.1.0"];
+            if reverse {
+                changes.reverse();
+            }
+            let mut args = vec!["--index", "idx.json", "--json"];
+            if apply {
+                args.extend(["apply", "--no-build", "--yes"]);
+            } else {
+                args.push("plan");
+            }
+            args.extend(changes);
+            let output = env.run(&args);
+            assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+            let plan: Value = serde_json::from_str(&stdout(&output)).unwrap();
+            let expected = serde_json::json!({
+                "code": "plan.breaksDependent",
+                "params": { "package": "UBotCore", "dependent": "UBotROS", "range": "^0.1.3" }
+            });
+            assert_eq!(
+                plan["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|error| **error == expected)
+                    .count(),
+                1,
+                "{plan}"
+            );
+            let core = plan["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|change| change["package"] == "UBotCore")
+                .unwrap();
+            assert_eq!(core["version"], "0.1.0");
+            // Plan can also report noEngine (build defaults to true); the exact dependency
+            // diagnostic above, rather than the exit code alone, proves this regression.
+            assert_eq!(fs::read(&env.project).unwrap(), original);
+            assert!(!env.project.parent().unwrap().join("Plugins").exists());
+            assert!(!env.home.join("tasks.json").exists());
+        }
+    }
 }
 
 #[test]

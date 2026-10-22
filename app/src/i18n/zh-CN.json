@@ -383,6 +383,7 @@
     "plan.dirty": "{package} 有本地修改。",
     "plan.onBranch": "{package} 在分支 {branch} 上，更新后会切换到新版本的标签。",
     "plan.breaksDependent": "{dependent} 需要 {package} {range}。",
+    "plan.requestedVersionChanged": "已指定 {package} {requested}，但计划解析为 {resolved}。",
     "plan.alsoDisable": "禁用 {package} 会同时禁用 {dependents}。",
     "plan.enginePluginMissing": "引擎中没有名为 {plugin} 的插件。",
     "plan.folderExists": "{dest} 已存在。",

@@ -388,15 +388,22 @@ The id is `session:<id>`; the manager's own ROS check uses `ros:bridge`, scope `
 `Change = { kind: install | update | enable | disable | uninstall, package, version? }`. The UI keeps
 at most one change per package (a new one replaces the old; the planner does the same, the last one
 wins). `enable`/`disable` also work for non-uBot plugins (legacy plugins, engine plugins) — they only
-touch `.uproject`. `version` is read by `install` and `update` only; `null` means the latest index
-version for both (the CLI is stricter, §10).
+touch `.uproject`. `version` is read by `install` and `update` only. An explicit install version is a
+fixed target for this plan, compared using SemVer precedence. A `null` install version starts with
+the latest index version and may adjust to satisfy dependencies; a `null` update selects the latest
+index version (the CLI is stricter, §10).
 
 ### 5.2 Planning (`plan(changes, options) -> Plan`)
 
 Planning rescans the project without network access and resolves over the current installed set + the
 merged index. Changes are processed in this order: disable and uninstall, update, install, enable.
-`Plan.changes` echoes them, with the package casing and the version of an install filled in. With no
-project open, any change is the error `plan.noProject`.
+After normalizing changes (trim names and versions, case-insensitive package names, last request
+wins), valid explicit install targets are registered before any change is resolved, including updates
+that install new dependencies. `Plan.changes` is filled in after all resolution: install names use the
+canonical casing, explicit versions may only normalize to SemVer-equivalent index text, and installs
+without a version echo their final acquisition version. An unavailable explicit version is preserved
+in the echo. Replanning the echo must preserve explicit conflicts and successful acquisition versions.
+With no project open, any change is the error `plan.noProject`.
 
 - **install X[@v]**: any plugin named X already in the project → `plan.alreadyInstalled`. X must exist
   in the index (`plan.notInIndex`) with a non-planned version (`plan.planned`; default latest; `v` must
@@ -420,7 +427,12 @@ project open, any change is the error `plan.noProject`.
   dependent that is itself about to be updated counts with its new requirements; when no version
   satisfies all of them the requirement of this package decides and the final check below names the
   dependents left unsatisfied), else `plan.noVersion`; not installed → install the highest satisfying
-  index version. Required engine plugins → enable if not enabled (`plan.enginePluginMissing` if the
+  index version. An explicit install target takes precedence over this automatic selection: recursive
+  installs use it, and dependency updates and look-ahead requirements cannot replace it. A temporary
+  owner's incompatible requirements do not create a permanent error; conflicts are checked against
+  final enabled owners and their final requirements. Even if a dependency already installed X in the
+  virtual plan, an explicit unavailable version still reports `plan.noVersion`.
+  Required engine plugins → enable if not enabled (`plan.enginePluginMissing` if the
   engine lacks it; without an engine the entry is written unchecked). Then enable X.
 - **update X[@v]** (also used for downgrades): X installed (`plan.notInstalled`), in the index
   (`plan.notInIndex`) with that version (`plan.noVersion`). What happens depends on the install kind (§3):
@@ -452,8 +464,13 @@ project open, any change is the error `plan.noProject`.
   version or whose dependency's version the plan changed must have its requirements met by the final
   versions, whatever the order of changes and `requires` lists; an explicit update that ended at another
   version is explained by the dependents that turned it back. A violation is `plan.breaksDependent`
-  {package, dependent, range}. A conflict that exists already and is not touched by the plan is left to
-  the problems list (§4).
+  {package, dependent, range}. Explicit install targets are also independently compared with the final
+  installed versions: when no specific dependent diagnostic explains a mismatch,
+  `plan.requestedVersionChanged` {package, requested, resolved} blocks the plan. A failed install
+  without a final version retains its original diagnostic without a synthetic resolved version.
+  Update targets retain their existing registration rules: only updates that changed the virtual
+  version are recorded, not no-op updates. A conflict that exists already and is not touched by the
+  plan is left to the problems list (§4).
 - Errors (`plan.*` Msgs) make the plan unappliable; warnings are shown and do not block.
 
 Step order and groups: `download` (clone, checkout, download — dependencies first) → `project` (enable
@@ -891,6 +908,7 @@ table is in both files with the parameters listed here.
 | plan.dirty {package} | {package} has local changes. | {package} 有本地修改。 |
 | plan.onBranch {package, branch} | {package} is on branch {branch}; it will be detached at the new version. | {package} 在分支 {branch} 上，更新后会切换到新版本的标签。 |
 | plan.breaksDependent {package, dependent, range} | {dependent} requires {package} {range}. | {dependent} 需要 {package} {range}。 |
+| plan.requestedVersionChanged {package, requested, resolved} | Requested {package} {requested}, but the plan resolved {resolved}. | 已指定 {package} {requested}，但计划解析为 {resolved}。 |
 | plan.alsoDisable {package, dependents} | Disabling {package} also disables {dependents}. | 禁用 {package} 会同时禁用 {dependents}。 |
 | plan.enginePluginMissing {plugin} | The engine has no plugin named {plugin}. | 引擎中没有名为 {plugin} 的插件。 |
 | plan.folderExists {dest} | {dest} already exists. | {dest} 已存在。 |

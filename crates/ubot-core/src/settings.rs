@@ -612,6 +612,8 @@ mod tests {
     fn defaults_and_unknown_keys() {
         let dir = tempfile::tempdir().unwrap();
         let dirs = AppDirs::under(dir.path().to_path_buf());
+        let project = dir.path().join("P.uproject");
+        let project_text = project.to_string_lossy().into_owned();
         let store = SettingsStore::load(&dirs);
         assert_eq!(store.settings.index.sources, builtin_sources());
         assert_eq!(store.settings.install.directory, "Plugins/uBot");
@@ -631,7 +633,7 @@ mod tests {
                 ], "syncOnStart": false, "extra": 1 },
                 "build": { "configuration": "DebugGame", "engineId": "" },
                 "ros": { "port": "not a number" },
-                "ignoredProblems": { "C:\\P\\P.uproject": [ "legacy:A" ] },
+                "ignoredProblems": { (project_text.clone()): [ "legacy:A" ] },
                 "userRecipes": [ { "id": "mine", "name": { "en": "Mine" }, "description": { "en": "" }, "packages": [ "UBotCore" ] } ]
             })
             .to_string(),
@@ -673,21 +675,21 @@ mod tests {
         );
         if cfg!(windows) {
             assert_eq!(
-                store.ignored_for(Path::new("c:\\p\\p.uproject")),
+                store.ignored_for(Path::new(&project_text.to_ascii_lowercase())),
                 ["legacy:A"]
             );
         }
         assert!(store.user_recipes[0].user);
 
         store.add_recent(Path::new(&dir.path().join("A.uproject")));
-        store.ignore(Path::new("C:\\P\\P.uproject"), "engine");
+        store.ignore(&project, "engine");
         store.save().unwrap();
         let saved: Value =
             serde_json::from_str(&std::fs::read_to_string(dirs.settings_file()).unwrap()).unwrap();
         assert_eq!(saved["future"], json!({ "keep": true }));
         assert_eq!(saved["index"]["extra"], 1);
         assert_eq!(
-            saved["ignoredProblems"]["C:\\P\\P.uproject"],
+            saved["ignoredProblems"][project_text.as_str()],
             json!(["legacy:A", "engine"])
         );
         assert_eq!(saved["userRecipes"][0]["user"], true);

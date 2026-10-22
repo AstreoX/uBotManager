@@ -383,6 +383,7 @@
     "plan.dirty": "{package} has local changes.",
     "plan.onBranch": "{package} is on branch {branch}; it will be detached at the new version.",
     "plan.breaksDependent": "{dependent} requires {package} {range}.",
+    "plan.requestedVersionChanged": "Requested {package} {requested}, but the plan resolved {resolved}.",
     "plan.alsoDisable": "Disabling {package} also disables {dependents}.",
     "plan.enginePluginMissing": "The engine has no plugin named {plugin}.",
     "plan.folderExists": "{dest} already exists.",

@@ -128,6 +128,18 @@ struct DownloadRecord {
     replace: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestedVersionOrigin {
+    Install,
+    AppliedUpdate,
+}
+
+struct RequestedVersion {
+    name: String,
+    version: SemVer,
+    origin: RequestedVersionOrigin,
+}
+
 struct Planner<'a> {
     workspace: &'a Workspace,
     packages: HashMap<String, VPackage>,
@@ -148,11 +160,10 @@ struct Planner<'a> {
     /// would make the result depend on the order of the changes and of the `requires` lists.
     /// An entry is dropped when the version is applied.
     planned_requires: HashMap<String, Vec<Dependency>>,
-    /// Explicit updates that were applied to the virtual state: package key -> (name, the version
-    /// asked for). `verify` compares them with the final versions, because a later change (an
-    /// enabled package that needs the old range) can turn the package back without anyone saying
-    /// so.
-    requested: HashMap<String, (String, SemVer)>,
+    /// Explicit install targets, known before resolution, and explicit updates that were applied
+    /// to the virtual state. Only install targets pin dependency selection; both are checked
+    /// against the final versions in `verify`.
+    requested: HashMap<String, RequestedVersion>,
     errors: Vec<Msg>,
     warnings: Vec<Msg>,
 }
@@ -313,6 +324,35 @@ impl<'a> Planner<'a> {
             .insert(key(name), dependencies_of(version));
     }
 
+    /// Records a valid explicit install target without installing anything. The actual request
+    /// path still diagnoses installed plugins, missing versions and unsafe acquisition inputs.
+    fn expect_install(&mut self, name: &str, version: &str) {
+        if self.workspace.plugin(name).is_some() {
+            return;
+        }
+        let Some(package) = self.index_package(name) else {
+            return;
+        };
+        let Some(version) = package.find_version(version).and_then(IndexVersion::semver) else {
+            return;
+        };
+        self.requested.insert(
+            key(name),
+            RequestedVersion {
+                name: package.name.clone(),
+                version,
+                origin: RequestedVersionOrigin::Install,
+            },
+        );
+    }
+
+    fn pinned_install_version(&self, name: &str) -> Option<&SemVer> {
+        self.requested
+            .get(&key(name))
+            .filter(|requested| requested.origin == RequestedVersionOrigin::Install)
+            .map(|requested| &requested.version)
+    }
+
     /// Installs a package that is not installed: clone, requirements, enable.
     fn install(
         &mut self,
@@ -321,7 +361,7 @@ impl<'a> Planner<'a> {
         constraint: Option<&Constraint>,
         required_by: Option<&str>,
     ) {
-        if self.package(name).installed {
+        if requested.is_none() && self.package(name).installed {
             return;
         }
         let Some(index_package) = self.index_package(name) else {
@@ -337,14 +377,15 @@ impl<'a> Planner<'a> {
             self.error(msg("plan.planned", &[("package", &display)]));
             return;
         }
-        let chosen = match (requested, constraint) {
-            (Some(requested), _) => index_package.find_version(requested),
-            (None, Some(constraint)) => index_package
+        let chosen = match (requested, self.pinned_install_version(name), constraint) {
+            (Some(requested), _, _) => index_package.find_version(requested),
+            (None, Some(pinned), _) => index_package.find_version(&pinned.to_string()),
+            (None, None, Some(constraint)) => index_package
                 .released_versions()
                 .into_iter()
                 .find(|(_, version)| constraint.is_satisfied_by(version))
                 .map(|(v, _)| v),
-            (None, None) => index_package.latest(),
+            (None, None, None) => index_package.latest(),
         };
         let Some(version) = chosen else {
             let range = requested
@@ -357,6 +398,11 @@ impl<'a> Planner<'a> {
             ));
             return;
         };
+        // An earlier dependency may already have installed this package, but an explicit
+        // version must still be validated (including a nonexistent or planned version).
+        if self.package(name).installed {
+            return;
+        }
 
         let Some(context) = self.workspace.project.as_ref() else {
             return;
@@ -561,7 +607,10 @@ impl<'a> Planner<'a> {
         let constraint = Constraint::parse(&dependency.version).unwrap_or_default();
         let name = self.package(&dependency.name).name.clone();
         let dep_key = key(&name);
-        if self.protected.contains(&dep_key) || self.planned_requires.contains_key(&dep_key) {
+        if self.protected.contains(&dep_key)
+            || self.planned_requires.contains_key(&dep_key)
+            || self.pinned_install_version(&name).is_some()
+        {
             return None;
         }
         let (installed, version) = {
@@ -635,6 +684,15 @@ impl<'a> Planner<'a> {
                         .as_ref()
                         .is_some_and(|version| constraint.is_satisfied_by(version));
                 if satisfied {
+                    if !enabled {
+                        self.ensure_enabled(&dep_name, Some(&owner_name));
+                    }
+                    continue;
+                }
+                // Keep the explicit install target even if this owner's current requirements
+                // reject it. The owner may still change; only its final requirements diagnose
+                // the conflict. Do not select a temporary version or emit a premature noVersion.
+                if self.pinned_install_version(&dep_name).is_some() {
                     if !enabled {
                         self.ensure_enabled(&dep_name, Some(&owner_name));
                     }
@@ -738,7 +796,7 @@ impl<'a> Planner<'a> {
             .chain(self.checkouts.iter().map(|checkout| key(&checkout.package)))
             .chain(self.downloads.iter().map(|download| key(&download.package)))
             .collect();
-        let mut conflicts = self.turned_back_updates();
+        let mut conflicts = self.requested_version_conflicts();
         if touched.is_empty() && conflicts.is_empty() {
             return;
         }
@@ -789,16 +847,14 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// The conflicts of explicit updates that ended at another version than the one asked for:
-    /// the enabled packages whose requirements the asked-for version does not meet are what
-    /// turned the package back (the final-state check cannot see it when the package is back at
-    /// the version it had).
-    fn turned_back_updates(&mut self) -> Vec<Msg> {
+    /// Explains requests that ended at another version using final dependent requirements.
+    /// Install targets also get a fallback when no dependent explains the mismatch.
+    fn requested_version_conflicts(&mut self) -> Vec<Msg> {
         if self.requested.is_empty() {
             return Vec::new();
         }
         self.load_all_installed();
-        let mut requested: Vec<(&String, &(String, SemVer))> = self.requested.iter().collect();
+        let mut requested: Vec<(&String, &RequestedVersion)> = self.requested.iter().collect();
         requested.sort_by(|a, b| a.0.cmp(b.0));
         let mut dependents: Vec<&VPackage> = self
             .packages
@@ -808,11 +864,23 @@ impl<'a> Planner<'a> {
         dependents.sort_by_key(|package| package.name.to_lowercase());
 
         let mut conflicts = Vec::new();
-        for (package_key, (display, wanted)) in requested {
-            let final_version = self.packages.get(package_key).and_then(VPackage::semver);
+        for (package_key, requested) in requested {
+            let display = &requested.name;
+            let wanted = &requested.version;
+            let install = requested.origin == RequestedVersionOrigin::Install;
+            let final_version = self
+                .packages
+                .get(package_key)
+                .filter(|package| package.installed)
+                .and_then(VPackage::semver);
             if final_version.as_ref() == Some(wanted) {
                 continue;
             }
+            // Failed installs already have a specific diagnostic and no resolved version.
+            if install && final_version.is_none() {
+                continue;
+            }
+            let before = conflicts.len();
             for dependent in &dependents {
                 for dependency in dependent
                     .requires
@@ -820,7 +888,13 @@ impl<'a> Planner<'a> {
                     .filter(|d| !d.optional && key(&d.name) == *package_key)
                 {
                     let constraint = Constraint::parse(&dependency.version).unwrap_or_default();
-                    if !constraint.is_any() && !constraint.is_satisfied_by(wanted) {
+                    if !constraint.is_any()
+                        && (!constraint.is_satisfied_by(wanted)
+                            || (install
+                                && final_version
+                                    .as_ref()
+                                    .is_some_and(|version| !constraint.is_satisfied_by(version))))
+                    {
                         conflicts.push(msg(
                             "plan.breaksDependent",
                             &[
@@ -830,6 +904,18 @@ impl<'a> Planner<'a> {
                             ],
                         ));
                     }
+                }
+            }
+            if install && conflicts.len() == before {
+                if let Some(resolved) = final_version {
+                    conflicts.push(msg(
+                        "plan.requestedVersionChanged",
+                        &[
+                            ("package", display),
+                            ("requested", &wanted.to_string()),
+                            ("resolved", &resolved.to_string()),
+                        ],
+                    ));
                 }
             }
         }
@@ -930,7 +1016,14 @@ impl<'a> Planner<'a> {
         if let Some(wanted) = wanted {
             if before.as_ref() != Some(&wanted) && package.semver().as_ref() == Some(&wanted) {
                 let display = package.name.clone();
-                self.requested.insert(key(name), (display, wanted));
+                self.requested.insert(
+                    key(name),
+                    RequestedVersion {
+                        name: display,
+                        version: wanted,
+                        origin: RequestedVersionOrigin::AppliedUpdate,
+                    },
+                );
             }
         }
     }
@@ -965,6 +1058,12 @@ impl<'a> Planner<'a> {
             return;
         };
         let target_semver = target.semver();
+        if self
+            .pinned_install_version(name)
+            .is_some_and(|pinned| target_semver.as_ref() != Some(pinned))
+        {
+            return;
+        }
 
         // A package this plan installs is installed at the new version instead (cloned, or
         // downloaded when that version has binaries).
@@ -1382,6 +1481,14 @@ pub fn plan_with(
     };
     let project = &context.project;
     let mut planner = Planner::new(workspace);
+    // Install targets must be visible even to dependencies pulled in during the Update phase.
+    for change in &changes {
+        if change.kind == ChangeKind::Install {
+            if let Some(version) = &change.version {
+                planner.expect_install(&change.package, version);
+            }
+        }
+    }
 
     // Disables and uninstalls first, so that other changes see what is going away.
     let order = |kind: ChangeKind| match kind {
@@ -1392,7 +1499,6 @@ pub fn plan_with(
     };
     let mut ordered: Vec<&Change> = changes.iter().collect();
     ordered.sort_by_key(|change| order(change.kind));
-    let mut resolved_changes = changes.clone();
 
     // An explicit update is known up front. Noting it first keeps the other changes from judging
     // the package by the requirements of the version it is leaving.
@@ -1424,26 +1530,6 @@ pub fn plan_with(
                     continue;
                 }
                 planner.install(name, change.version.as_deref(), None, None);
-                let installed = planner
-                    .clones
-                    .iter()
-                    .map(|clone| (&clone.package, &clone.version))
-                    .chain(
-                        planner
-                            .downloads
-                            .iter()
-                            .map(|download| (&download.package, &download.version)),
-                    )
-                    .find(|(package, _)| package.eq_ignore_ascii_case(name));
-                if let Some((package, version)) = installed {
-                    if let Some(entry) = resolved_changes
-                        .iter_mut()
-                        .find(|c| c.package.eq_ignore_ascii_case(name))
-                    {
-                        entry.package = package.clone();
-                        entry.version = Some(version.clone());
-                    }
-                }
             }
             ChangeKind::Update => {
                 if workspace.installed(name).is_none() {
@@ -1475,6 +1561,38 @@ pub fn plan_with(
     }
 
     planner.verify();
+
+    // Echo only final choices. An explicit version may be normalized to equivalent index text,
+    // but must never be replaced by a different version, even in an erroneous plan.
+    let mut resolved_changes = changes;
+    for change in &mut resolved_changes {
+        if change.kind != ChangeKind::Install {
+            continue;
+        }
+        change.package = workspace.display_name(&change.package);
+        if let Some(requested) = &change.version {
+            if let Some(version) = workspace
+                .index
+                .package(&change.package)
+                .and_then(|package| package.find_version(requested))
+            {
+                change.version = Some(version.version.clone());
+            }
+        } else {
+            change.version = planner
+                .clones
+                .iter()
+                .map(|clone| (&clone.package, &clone.version))
+                .chain(
+                    planner
+                        .downloads
+                        .iter()
+                        .map(|download| (&download.package, &download.version)),
+                )
+                .find(|(package, _)| package.eq_ignore_ascii_case(&change.package))
+                .map(|(_, version)| version.clone());
+        }
+    }
 
     let project_file = project.file_name();
     let engine = context.engine.clone();
@@ -1835,6 +1953,526 @@ mod tests {
 
     fn texts(messages: &[Msg]) -> Vec<String> {
         messages.iter().map(render_en).collect()
+    }
+
+    const INSTALL_VERSIONS: &str =
+        include_str!("../tests/fixtures/install-version-constraints.json");
+
+    fn install_versions_workspace(dir: &Path, prebuilt: bool) -> Workspace {
+        let mut workspace = sample_workspace(dir, false);
+        let context = workspace.project.as_mut().unwrap();
+        std::fs::remove_dir_all(context.project.dir.join("Plugins")).unwrap();
+        write(
+            &context.project.path,
+            r#"{ "FileVersion": 3, "EngineAssociation": "5.5" }"#,
+        );
+        context.git.clear();
+        context.project.reload().unwrap();
+        set_install_index(
+            &mut workspace,
+            &serde_json::from_str(INSTALL_VERSIONS).unwrap(),
+        );
+        if prebuilt {
+            for (name, version) in [
+                ("UBotCore", "0.1.0"),
+                ("UBotCore", "0.1.3"),
+                ("UBotCore", "0.1.4"),
+                ("UBotROS", "0.1.3"),
+            ] {
+                crate::workspace::tests::add_binaries(&mut workspace, name, version);
+            }
+        }
+        workspace
+    }
+
+    fn set_install_index(workspace: &mut Workspace, index: &serde_json::Value) {
+        workspace.index = crate::index::MergedIndex::merge(&[crate::index::SourceIndex {
+            id: "install-test".into(),
+            index: crate::index::parse(&index.to_string()).unwrap(),
+        }]);
+    }
+
+    fn install_pair(core: Option<&str>, reverse: bool) -> Vec<Change> {
+        let mut changes = vec![
+            change(ChangeKind::Install, "UBotROS", Some("0.1.3")),
+            change(ChangeKind::Install, "UBotCore", core),
+        ];
+        if reverse {
+            changes.reverse();
+        }
+        changes
+    }
+
+    fn assert_core_acquisition(prepared: &PreparedPlan, version: &str, prebuilt: bool) {
+        let acquisitions: Vec<&StepAction> = prepared
+            .actions
+            .iter()
+            .filter(|action| match action {
+                StepAction::Clone { package, .. } | StepAction::Download { package, .. } => {
+                    package == "UBotCore"
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(acquisitions.len(), 1, "{:?}", prepared.actions);
+        match acquisitions[0] {
+            StepAction::Clone { git_ref, .. } => {
+                assert!(!prebuilt);
+                assert_eq!(git_ref, &format!("v{version}"));
+            }
+            StepAction::Download {
+                version: actual, ..
+            } => {
+                assert!(prebuilt);
+                assert_eq!(actual, version);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_core_echo(prepared: &PreparedPlan, version: &str) {
+        let core = prepared
+            .plan
+            .changes
+            .iter()
+            .find(|c| c.package == "UBotCore")
+            .unwrap();
+        assert_eq!(core.version.as_deref(), Some(version));
+    }
+
+    fn core_ros_conflict() -> Msg {
+        msg(
+            "plan.breaksDependent",
+            &[
+                ("package", "UBotCore"),
+                ("dependent", "UBotROS"),
+                ("range", "^0.1.3"),
+            ],
+        )
+    }
+
+    #[test]
+    fn explicit_install_conflicts_are_order_independent() {
+        for prebuilt in [false, true] {
+            for reverse in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let workspace = install_versions_workspace(dir.path(), prebuilt);
+                let prepared = plan(
+                    &workspace,
+                    &install_pair(Some("0.1.0"), reverse),
+                    &options(false),
+                );
+                assert_eq!(prepared.plan.errors, vec![core_ros_conflict()]);
+                assert_core_echo(&prepared, "0.1.0");
+                assert_core_acquisition(&prepared, "0.1.0", prebuilt);
+                let replay = plan(&workspace, &prepared.plan.changes, &options(false));
+                assert_eq!(replay.plan.errors, vec![core_ros_conflict()]);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_install_keeps_a_compatible_non_latest_version() {
+        for prebuilt in [false, true] {
+            for reverse in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let workspace = install_versions_workspace(dir.path(), prebuilt);
+                let prepared = plan(
+                    &workspace,
+                    &install_pair(Some("0.1.3"), reverse),
+                    &options(false),
+                );
+                assert!(
+                    prepared.plan.errors.is_empty(),
+                    "{:?}",
+                    texts(&prepared.plan.errors)
+                );
+                assert_core_echo(&prepared, "0.1.3");
+                assert_core_acquisition(&prepared, "0.1.3", prebuilt);
+                let replay = plan(&workspace, &prepared.plan.changes, &options(false));
+                assert!(
+                    replay.plan.errors.is_empty(),
+                    "{:?}",
+                    texts(&replay.plan.errors)
+                );
+                assert_core_acquisition(&replay, "0.1.3", prebuilt);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_install_never_resolves_an_unselected_latest_version() {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut workspace = install_versions_workspace(dir.path(), false);
+            let mut index: serde_json::Value = serde_json::from_str(INSTALL_VERSIONS).unwrap();
+            index["packages"][0]["versions"][2]["requires"] =
+                serde_json::json!([{ "name": "UBotExtra", "version": "^1.0.0" }]);
+            index["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "UBotExtra", "repository": "https://example.invalid/uBotExtra.git",
+                    "versions": [{ "version": "0.1.0", "ref": "v0.1.0" }]
+                }));
+            set_install_index(&mut workspace, &index);
+            let prepared = plan(
+                &workspace,
+                &install_pair(Some("0.1.3"), reverse),
+                &options(false),
+            );
+            assert!(
+                prepared.plan.errors.is_empty(),
+                "{:?}",
+                texts(&prepared.plan.errors)
+            );
+            assert_core_acquisition(&prepared, "0.1.3", false);
+            assert!(!prepared.actions.iter().any(|action| matches!(
+                action,
+                StepAction::Clone { package, .. } | StepAction::Download { package, .. }
+                    if package == "UBotExtra"
+            )));
+        }
+    }
+
+    #[test]
+    fn implicit_install_echoes_the_final_version() {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut workspace = install_versions_workspace(dir.path(), false);
+            let automatic = plan(
+                &workspace,
+                &[change(ChangeKind::Install, "UBotROS", None)],
+                &options(false),
+            );
+            assert!(automatic.plan.errors.is_empty());
+            assert_core_acquisition(&automatic, "0.1.4", false);
+            let mut index: serde_json::Value = serde_json::from_str(INSTALL_VERSIONS).unwrap();
+            index["packages"][1]["versions"][0]["requires"][0]["version"] = "=0.1.3".into();
+            set_install_index(&mut workspace, &index);
+            let prepared = plan(&workspace, &install_pair(None, reverse), &options(false));
+            assert!(
+                prepared.plan.errors.is_empty(),
+                "{:?}",
+                texts(&prepared.plan.errors)
+            );
+            assert_core_acquisition(&prepared, "0.1.3", false);
+            assert_core_echo(&prepared, "0.1.3");
+            let replay = plan(&workspace, &prepared.plan.changes, &options(false));
+            assert!(
+                replay.plan.errors.is_empty(),
+                "{:?}",
+                texts(&replay.plan.errors)
+            );
+            assert_core_acquisition(&replay, "0.1.3", false);
+        }
+    }
+
+    #[test]
+    fn explicit_install_validates_a_version_after_implicit_install() {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = install_versions_workspace(dir.path(), false);
+            let prepared = plan(
+                &workspace,
+                &install_pair(Some("9.9.9"), reverse),
+                &options(false),
+            );
+            assert_eq!(
+                prepared.plan.errors,
+                vec![msg(
+                    "plan.noVersion",
+                    &[("package", "UBotCore"), ("range", "9.9.9")]
+                )]
+            );
+            assert_core_echo(&prepared, "9.9.9");
+        }
+    }
+
+    #[test]
+    fn explicit_install_normalizes_names_and_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = install_versions_workspace(dir.path(), false);
+        for version in [" v0.1.3 ", "0.1.3+build.42"] {
+            let prepared = plan(
+                &workspace,
+                &[
+                    change(ChangeKind::Install, "UBotROS", Some("0.1.3")),
+                    change(ChangeKind::Install, " ubotcore ", Some(version)),
+                ],
+                &options(false),
+            );
+            assert!(
+                prepared.plan.errors.is_empty(),
+                "{:?}",
+                texts(&prepared.plan.errors)
+            );
+            assert_core_echo(&prepared, "0.1.3");
+            assert_core_acquisition(&prepared, "0.1.3", false);
+        }
+        for (first, last) in [("0.1.0", "0.1.3"), ("0.1.3", "0.1.0")] {
+            let prepared = plan(
+                &workspace,
+                &[
+                    change(ChangeKind::Install, "UBotCore", Some(first)),
+                    change(ChangeKind::Install, "UBotROS", Some("0.1.3")),
+                    change(ChangeKind::Install, " ubotcore ", Some(last)),
+                ],
+                &options(false),
+            );
+            assert_eq!(prepared.plan.changes.len(), 2);
+            assert_core_echo(&prepared, last);
+            assert_core_acquisition(&prepared, last, false);
+            if last == "0.1.0" {
+                assert_eq!(prepared.plan.errors, vec![core_ros_conflict()]);
+            } else {
+                assert!(
+                    prepared.plan.errors.is_empty(),
+                    "{:?}",
+                    texts(&prepared.plan.errors)
+                );
+            }
+        }
+        for (name, version, expected) in [
+            (
+                "UBotCore",
+                "0.2.0",
+                msg(
+                    "plan.noVersion",
+                    &[("package", "UBotCore"), ("range", "0.2.0")],
+                ),
+            ),
+            (
+                "UBotFuture",
+                "1.0.0",
+                msg("plan.planned", &[("package", "UBotFuture")]),
+            ),
+        ] {
+            let prepared = plan(
+                &workspace,
+                &[change(ChangeKind::Install, name, Some(version))],
+                &options(false),
+            );
+            assert_eq!(prepared.plan.errors, vec![expected]);
+        }
+        let short = plan(
+            &workspace,
+            &[change(ChangeKind::Install, "UBotCore", Some("0.1"))],
+            &options(false),
+        );
+        assert!(short.plan.errors.is_empty());
+        assert_core_echo(&short, "0.1.0");
+        assert_core_acquisition(&short, "0.1.0", false);
+        let unpinned = plan(
+            &workspace,
+            &[
+                change(ChangeKind::Install, "UBotCore", Some("0.1.0")),
+                change(ChangeKind::Install, "UBotROS", Some("0.1.3")),
+                change(ChangeKind::Install, "UBotCore", None),
+            ],
+            &options(false),
+        );
+        assert!(unpinned.plan.errors.is_empty());
+        assert_core_echo(&unpinned, "0.1.4");
+        assert_core_acquisition(&unpinned, "0.1.4", false);
+        let installed_dir = tempfile::tempdir().unwrap();
+        let installed = sample_workspace(installed_dir.path(), false);
+        let prepared = plan(
+            &installed,
+            &[change(ChangeKind::Install, "UBotCore", Some("9.9.9"))],
+            &options(false),
+        );
+        assert_eq!(
+            prepared.plan.errors,
+            vec![msg("plan.alreadyInstalled", &[("package", "UBotCore")])]
+        );
+    }
+
+    fn add_installed_for_install_test(
+        workspace: &mut Workspace,
+        name: &str,
+        requires: &[(&str, &str)],
+    ) {
+        let context = workspace.project.as_mut().unwrap();
+        write(
+            &context
+                .project
+                .dir
+                .join(format!("Plugins/{name}/{name}.uplugin")),
+            &descriptor("0.1.0", "Adapter", requires, &[]),
+        );
+        context.project.reload().unwrap();
+        context.git.insert(
+            key(name),
+            GitInfo {
+                is_checkout: true,
+                tag: Some("v0.1.0".into()),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn explicit_install_pins_are_used_before_update_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = install_versions_workspace(dir.path(), false);
+        add_installed_for_install_test(&mut workspace, "UBotROS", &[]);
+        let prepared = plan(
+            &workspace,
+            &[
+                change(ChangeKind::Install, "UBotCore", Some("0.1.3")),
+                change(ChangeKind::Update, "UBotROS", Some("0.1.3")),
+            ],
+            &options(false),
+        );
+        assert!(
+            prepared.plan.errors.is_empty(),
+            "{:?}",
+            texts(&prepared.plan.errors)
+        );
+        assert_core_acquisition(&prepared, "0.1.3", false);
+        assert_core_echo(&prepared, "0.1.3");
+    }
+
+    #[test]
+    fn explicit_install_conflicts_use_final_requirements() {
+        for disable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut workspace = install_versions_workspace(dir.path(), false);
+            add_installed_for_install_test(&mut workspace, "UBotROS", &[]);
+            add_installed_for_install_test(&mut workspace, "UBotA", &[("UBotCore", ">=0.1.4")]);
+            let mut index: serde_json::Value = serde_json::from_str(INSTALL_VERSIONS).unwrap();
+            index["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "UBotA", "repository": "https://example.invalid/uBotA.git",
+                    "versions": [{ "version": "0.1.3", "ref": "v0.1.3",
+                        "requires": [{ "name": "UBotCore", "version": "^0.1.3" }] }]
+                }));
+            set_install_index(&mut workspace, &index);
+            let prepared = plan(
+                &workspace,
+                &[
+                    change(ChangeKind::Update, "UBotROS", Some("0.1.3")),
+                    change(
+                        if disable {
+                            ChangeKind::Disable
+                        } else {
+                            ChangeKind::Update
+                        },
+                        "UBotA",
+                        Some("0.1.3"),
+                    ),
+                    change(ChangeKind::Install, "UBotCore", Some("0.1.3")),
+                ],
+                &options(false),
+            );
+            assert!(
+                prepared.plan.errors.is_empty(),
+                "{:?}",
+                texts(&prepared.plan.errors)
+            );
+            assert_core_acquisition(&prepared, "0.1.3", false);
+        }
+    }
+
+    #[test]
+    fn explicit_install_defers_requirements_of_an_owner_updated_later() {
+        for temporary_range in [">=0.1.4", ">=9.0.0"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut workspace = install_versions_workspace(dir.path(), false);
+            add_installed_for_install_test(&mut workspace, "UBotROS", &[]);
+            add_installed_for_install_test(
+                &mut workspace,
+                "UBotA",
+                &[("UBotCore", temporary_range)],
+            );
+            let context = workspace.project.as_mut().unwrap();
+            write(
+                &context.project.path,
+                r#"{ "FileVersion": 3, "EngineAssociation": "5.5",
+                    "Plugins": [{ "Name": "UBotA", "Enabled": false }] }"#,
+            );
+            context.project.reload().unwrap();
+            let mut index: serde_json::Value = serde_json::from_str(INSTALL_VERSIONS).unwrap();
+            index["packages"][1]["versions"][0]["requires"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "UBotA", "version": "^0.1.0"
+                }));
+            index["packages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "UBotA", "repository": "https://example.invalid/uBotA.git",
+                    "versions": [{ "version": "0.1.3", "ref": "v0.1.3",
+                        "requires": [{ "name": "UBotCore", "version": "^0.1.3" }] }]
+                }));
+            set_install_index(&mut workspace, &index);
+            // Updating ROS enables A at its old version, before the explicit update of A.
+            // Neither an available alternative Core nor a nonexistent one may poison the plan.
+            let prepared = plan(
+                &workspace,
+                &[
+                    change(ChangeKind::Update, "UBotROS", Some("0.1.3")),
+                    change(ChangeKind::Update, "UBotA", Some("0.1.3")),
+                    change(ChangeKind::Install, "UBotCore", Some("0.1.3")),
+                ],
+                &options(false),
+            );
+            assert!(
+                prepared.plan.errors.is_empty(),
+                "{:?}",
+                texts(&prepared.plan.errors)
+            );
+            assert_core_acquisition(&prepared, "0.1.3", false);
+        }
+    }
+
+    #[test]
+    fn explicit_install_mismatch_has_a_fallback_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = install_versions_workspace(dir.path(), false);
+        let mut planner = Planner::new(&workspace);
+        planner.expect_install("UBotCore", "v0.1.3");
+        // An install that failed before acquiring a version has no resolved value to report.
+        assert!(planner.requested_version_conflicts().is_empty());
+        let core = planner.package("UBotCore");
+        core.installed = true;
+        core.enabled = true;
+        core.version = Some("0.1.4".into());
+        let ros = planner.package("UBotROS");
+        ros.installed = true;
+        ros.enabled = true;
+        ros.version = Some("0.1.3".into());
+        assert_eq!(
+            planner.requested_version_conflicts(),
+            vec![msg(
+                "plan.requestedVersionChanged",
+                &[
+                    ("package", "UBotCore"),
+                    ("requested", "0.1.3"),
+                    ("resolved", "0.1.4"),
+                ],
+            )]
+        );
+        // A dependent rejecting either the requested or resolved version explains the mismatch.
+        for range in [">=0.1.4", "=0.1.3"] {
+            planner.package("UBotROS").requires[0].version = range.into();
+            assert_eq!(
+                planner.requested_version_conflicts(),
+                vec![msg(
+                    "plan.breaksDependent",
+                    &[
+                        ("package", "UBotCore"),
+                        ("dependent", "UBotROS"),
+                        ("range", range),
+                    ],
+                )]
+            );
+        }
     }
 
     #[test]
