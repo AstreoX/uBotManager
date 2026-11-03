@@ -4,17 +4,18 @@
 #   pull request that changes this file, or a manual run: test, build, upload the installer as an artifact
 #   tag vX.Y.Z: the same, then a draft release with the installer and its .sha256; publish it by hand
 #
-# Signing starts once SignPath is set up: the repository variables SIGNPATH_ORGANIZATION_ID,
+# Tagged releases require SignPath: the repository variables SIGNPATH_ORGANIZATION_ID,
 # SIGNPATH_PROJECT_SLUG and SIGNPATH_SIGNING_POLICY_SLUG, and the secret SIGNPATH_API_TOKEN. Then
 # ubot-manager.exe is signed before it goes into the installer, and the installer after it. Each signing
-# request waits for an approver in SignPath. See "Code signing policy" in README.md.
+# request waits for an approver in SignPath. Missing configuration fails before building a release.
+# PRs and branch runs produce unsigned test artifacts only. See "Code signing policy" in README.md.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: [".github/workflows/release.yml"]
+    paths: [".github/workflows/release.yml", "scripts/release-signing.ps1", "scripts/test-release-signing.ps1"]
   workflow_dispatch:
 
 permissions:
@@ -32,7 +33,6 @@ jobs:
       contents: write # the draft release of a tag
       actions: read # SignPath downloads the uploaded artifacts
     env:
-      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
       CARGO_TERM_COLOR: never
     defaults:
       run:
@@ -42,6 +42,17 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Test release signing checks
+        run: ./scripts/test-release-signing.ps1
+
+      - name: Check release signing configuration
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ github.ref_type == 'tag' && github.event_name != 'pull_request' && secrets.SIGNPATH_API_TOKEN || '' }}
+        run: ./scripts/release-signing.ps1
 
       - name: Read the version
         id: version
@@ -88,7 +99,7 @@ jobs:
 
       - name: Upload ubot-manager.exe for signing
         id: unsigned-exe
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: unsigned-exe
@@ -96,7 +107,7 @@ jobs:
           if-no-files-found: error
 
       - name: Sign ubot-manager.exe
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -112,7 +123,7 @@ jobs:
 
       # A second bundle run leaves the already marked exe unchanged; the check below makes sure of it.
       - name: Bundle the signed ubot-manager.exe
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         run: |
           Copy-Item signed/exe/ubot-manager.exe target/release/ubot-manager.exe -Force
           Push-Location app
@@ -133,7 +144,7 @@ jobs:
 
       - name: Upload the installer for signing
         id: unsigned-installer
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: unsigned-installer
@@ -141,7 +152,7 @@ jobs:
           if-no-files-found: error
 
       - name: Sign the installer
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -156,12 +167,18 @@ jobs:
           output-artifact-directory: signed/installer
 
       - name: Take the signed installer
-        if: env.SIGN == 'true'
+        if: github.ref_type == 'tag' && github.event_name != 'pull_request' && env.SIGN == 'true'
         run: |
           $name = '${{ steps.installer.outputs.name }}'
           Copy-Item "signed/installer/$name" "out/$name" -Force
           $signature = Get-AuthenticodeSignature "out/$name"
           if ($signature.Status -ne 'Valid') { throw "$name is not validly signed: $($signature.Status)" }
+
+      - name: Verify release signatures
+        if: github.ref_type == 'tag'
+        run: |
+          $name = '${{ steps.installer.outputs.name }}'
+          ./scripts/release-signing.ps1 -Action VerifyArtifacts -Path @('target/release/ubot-manager.exe', "out/$name")
 
       - name: Write the checksum
         run: |
@@ -184,11 +201,12 @@ jobs:
         run: |
           $version = '${{ steps.version.outputs.version }}'
           $name = '${{ steps.installer.outputs.name }}'
-          $signed = if ($env:SIGN -eq 'true') { '安装包已签名' } else { '安装包未签名，首次运行时 Windows SmartScreen 会提示「已保护你的电脑」，点「更多信息 → 仍要运行」' }
           $notes = @(
-            "下载 ``$name`` 安装（按当前用户安装，可选安装目录）。$signed。",
+            "下载 ``$name`` 安装（按当前用户安装，可选安装目录）。程序和安装包均已验证有效代码签名。",
             '',
             "核对下载：``(Get-FileHash .\$name -Algorithm SHA256).Hash`` 应与 ``$name.sha256`` 里的值一致。",
+            '',
+            '代码签名不保证 SmartScreen 立即建立信誉，Windows 仍可能显示提示。',
             '',
             "Code signing policy: https://github.com/${{ github.repository }}#code-signing-policy"
           ) -join "`n"

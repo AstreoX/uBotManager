@@ -35,7 +35,7 @@ uBot Manager 是 Windows 桌面程序，用于在 Unreal Engine 5.5 工程中安
 ## 安装
 
 1. 从 [Releases](https://github.com/AstreoX/uBotManager/releases) 下载 `uBot-Manager_<版本>_x64-setup.exe` 并运行。安装包按当前用户安装，无需管理员权限，安装目录可选。
-2. 安装包没有代码签名，SmartScreen 会提示「未知发布者」，选择「更多信息 > 仍要运行」。
+2. SignPath 申请仍在等待审批，当前 v0.1.3 安装包没有代码签名。先确认下载来自本仓库，并将 SHA-256 与发布页的 `.sha256` 文件核对，再在 SmartScreen 中选择「更多信息 > 仍要运行」；也可以从源码构建。
 
 其他方式：
 
@@ -107,7 +107,9 @@ Copyright 2026 AstreoX。本项目以 [Apache License 2.0](LICENSE) 发布，参
 
 ### Code signing policy
 
-发布的安装包由 [`Release` 工作流](.github/workflows/release.yml)从本仓库的源码构建后签名。签名正在向 SignPath Foundation 申请，生效之前发布的安装包没有签名。
+SignPath Foundation 的申请仍在等待审批，已有发布（截至 v0.1.3）没有签名。[`Release` 工作流](.github/workflows/release.yml)从本仓库源码构建：标签构建现在必须先检查完整的 SignPath 配置，依次签名程序、重新打包、签名安装包，并在创建草稿发布前验证两者的 Authenticode 签名。PR 和分支运行只产生未签名的测试产物。在签名获批并配置完成前，标签发布会失败，避免静默发布未签名安装包。
+
+有效签名可以验证发布者和文件完整性。[SmartScreen 还会评估信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)，所以完成签名也不保证 Windows 立即停止提示。
 
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
