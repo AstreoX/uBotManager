@@ -1,4 +1,4 @@
-> 从 README 的「命令行 ubot」和「发布 uBot Manager」两节迁出，文字未改动。只有一处链接改了：指向 `release.yml` 的相对路径，改成了从本文件出发的路径。
+> Package 预编译包和 Manager 安装包使用不同发布流程。Manager 安装包必须通过 GitHub 托管构建及代码签名检查。
 
 ### 制作和发布预编译包
 
@@ -60,15 +60,15 @@ ubot package <Name[@版本]>... --out <目录> [--engine <5.5 | 引擎根目录>
 
 1. 先发布还没发布的 Package（见 [发布流程](#发布流程)），然后运行 `node scripts/sync-index.mjs` 更新内置索引副本，提交并推送。构建前会检查这份副本是否最新，过旧就失败。
 2. 把版本号改成新版本：根目录 `Cargo.toml` 的 `[workspace.package]`、`src-tauri/tauri.conf.json`、`app/package.json`（以及 `app/package-lock.json` 开头的两处），提交并推送。
-3. 打标签 `v<版本>` 并推送。工作流检查三处版本和标签一致，跑前端和 Rust 的测试，检查内置索引副本，构建安装包。
-4. 签名接入后，工作流先后提交两个签名请求，先签 `ubot-manager.exe`、再签安装包，每个都要在 SignPath 里批准，一小时内没批准就失败。
-5. 工作流最后生成一个草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
+3. 确认 SignPath 已获批并配置完成，再打标签 `v<版本>` 并推送。标签构建缺少任一签名配置会在构建前失败。工作流检查三处版本和标签一致，跑前端和 Rust 的测试，检查内置索引副本，构建安装包。
+4. 工作流先后提交两个签名请求，先签 `ubot-manager.exe`，用签名后的程序重新打包，再签安装包。每个请求都要在 SignPath 里批准，一小时内没批准就失败。
+5. 工作流验证程序和安装包的 Authenticode 签名都有效后，才生成草稿 Release，附上 `uBot-Manager_<版本>_x64-setup.exe` 和 `.sha256`。检查后补上更新说明再发布。
 
-手动运行工作流（Actions 页的 *Run workflow*）只构建，安装包留在这次运行的 Artifacts 里，不生成 Release。
+PR 和分支上的手动运行只构建未签名测试产物，不使用签名密钥、不生成 Release。手动选择标签运行仍按标签发布处理，必须签名，并会尝试创建该标签的草稿 Release。
 
 ## 启用代码签名（SignPath Foundation）
 
-Release 工作流已经接好签名步骤；仓库变量没设置时跳过。SignPath Foundation 通过申请、发来邀请之后：
+SignPath Foundation 申请仍在等待审批。Release 工作流已接好签名步骤；标签运行缺少配置会失败，分支运行始终只产出未签名测试文件。通过申请、收到邀请之后：
 
 1. 在 SignPath 里建项目，记下组织 ID、项目 slug 和签名策略 slug：
    - 项目的可信构建系统选 GitHub.com，按提示给 `AstreoX/uBotManager` 安装并连接 SignPath 的 GitHub 应用。
@@ -76,8 +76,8 @@ Release 工作流已经接好签名步骤；仓库变量没设置时跳过。Sig
    - 签名策略要求手动批准，批准人是维护者本人。
 2. 在 SignPath 里给构建用的账号生成 API token。
 3. 在仓库的 *Settings > Secrets and variables > Actions* 里设置变量 `SIGNPATH_ORGANIZATION_ID`、`SIGNPATH_PROJECT_SLUG`、`SIGNPATH_SIGNING_POLICY_SLUG` 和密钥 `SIGNPATH_API_TOKEN`。
-4. 在 Actions 页手动运行一次 *Release*（只构建，不生成 Release），在 SignPath 里批准两次签名请求，确认两个文件的签名状态都是有效。
-5. 之后按 [发布 uBot Manager](#发布-ubot-manager) 发布；去掉 README 和文档站里「安装包未签名」的说明。
+4. 本地运行 `./scripts/test-release-signing.ps1` 检查发布条件及签名校验的回归；在分支上手动运行 *Release* 验证构建。该运行不会申请签名。
+5. 按 [发布 uBot Manager](#发布-ubot-manager) 准备第一个签名版本，在 SignPath 里批准两次请求，确认程序和安装包签名有效并检查草稿附件。正式发布签名版本后，再更新 README 和文档站里对当前版本的签名说明。[有效签名不保证 SmartScreen 立即建立信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)，不要承诺完全消除提示。
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>

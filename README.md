@@ -35,7 +35,7 @@ uBot Manager is a Windows desktop app that installs, updates, enables, disables 
 ## Install
 
 1. Download `uBot-Manager_<version>_x64-setup.exe` from [Releases](https://github.com/AstreoX/uBotManager/releases) and run it. It installs for the current user without administrator rights; the install folder is selectable.
-2. The installer is not code-signed. SmartScreen reports an unknown publisher; choose *More info > Run anyway*.
+2. The current v0.1.3 installer is not code-signed while the SignPath application is pending. Check that the download comes from this repository and compare its SHA-256 with the release's `.sha256` file before choosing *More info > Run anyway* in SmartScreen. You can also build from source.
 
 Alternatives:
 
@@ -109,7 +109,9 @@ Copyright 2026 AstreoX. Licensed under the [Apache License 2.0](LICENSE); see al
 
 ### Code signing policy
 
-Release installers are built from this repository's source by the [`Release` workflow](.github/workflows/release.yml) and then signed. Signing is being applied for with the SignPath Foundation; installers released before it takes effect are not signed.
+The SignPath Foundation application is pending; existing releases through v0.1.3 are unsigned. The [`Release` workflow](.github/workflows/release.yml) builds from this repository's source. Tagged builds now require all SignPath configuration before building, sign the application before rebundling, sign the installer, and verify both Authenticode signatures before creating a draft release. PRs and branch runs produce unsigned test artifacts only. Until signing is approved and configured, tagged releases fail instead of silently publishing unsigned installers.
+
+An effective signature identifies the publisher and protects file integrity. [SmartScreen also evaluates reputation](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation), so signing does not guarantee that Windows immediately stops showing warnings.
 
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
